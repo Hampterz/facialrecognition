@@ -1,0 +1,69 @@
+# Training data and model outputs
+training/
+output/
+validation/
+models/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Model files (large)
+*.pt
+*.pth
+*.h5
+*.pkl
+*.weights
+
+# Environment variables
+.env
+.env.local
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Documentation builds
+docs/_build/
+
+# Backup files
+*.bak
+*.backup
+*_backup/
+
