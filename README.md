@@ -13,47 +13,95 @@ A Python-based face recognition system with a beautiful GUI that can recognize f
 
 ## Prerequisites
 
-Before installing, make sure you have:
-- Python 3.9 or 3.10 (3.11 may have compatibility issues)
-- CMake installed
-- C compiler (gcc) - on Windows, install MinGW
+### Required System Components
 
-### Installing CMake and gcc
+**Python Version:**
+- **Python 3.12.7** (Recommended - Tested and working)
+- Python 3.9, 3.10, or 3.11 also supported
+
+**CMake:**
+- **CMake 4.2.1** or later
+- Required for building some dependencies
+
+**C Compiler:**
+- **Windows:** MinGW or Visual Studio Build Tools
+- **Linux:** gcc (usually pre-installed)
+- **macOS:** Xcode Command Line Tools
+
+### Installing System Prerequisites
 
 **Windows:**
-- Download CMake from [CMake downloads page](https://cmake.org/download/)
-- Install MinGW using Chocolatey: `choco install mingw`
+1. **Python 3.12.7:**
+   - Download from [python.org](https://www.python.org/downloads/)
+   - Or use Anaconda: `conda install python=3.12.7`
 
-**Linux:**
-- `sudo apt-get install cmake gcc` (Ubuntu/Debian)
-- `sudo yum install cmake gcc` (CentOS/RHEL)
+2. **CMake 4.2.1:**
+   - Download from [CMake downloads](https://cmake.org/download/)
+   - Or via Chocolatey: `choco install cmake --version=4.2.1`
+
+3. **C Compiler:**
+   - Install MinGW: `choco install mingw`
+   - Or install Visual Studio Build Tools (includes C++ compiler)
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt-get update
+sudo apt-get install python3.12 python3.12-venv python3-pip cmake gcc g++
+```
 
 **macOS:**
-- `brew install cmake gcc`
+```bash
+brew install python@3.12 cmake gcc
+```
 
 ## Installation
 
-### Quick Install
+### Step 1: Create Virtual Environment (Recommended)
+
+```bash
+# Windows
+python -m venv venv
+venv\Scripts\activate
+
+# Linux/macOS
+python3.12 -m venv venv
+source venv/bin/activate
+```
+
+### Step 2: Upgrade pip
+
+```bash
+python -m pip install --upgrade pip
+```
+
+### Step 3: Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-This will install:
-- **YOLOv8** for face detection (no dlib needed!)
-- **face-recognition** for face encoding/matching
-- **OpenCV** for camera support
-- All other dependencies
+This will install the following **exact versions** (tested and working):
+- **ultralytics==8.3.245** - YOLO models for face detection
+- **huggingface-hub==0.36.0** - Model downloading
+- **supervision==0.27.0** - Detection utilities
+- **face-recognition==1.3.0** - Face encoding and matching
+- **retina-face==0.0.17** - RetinaFace detector (optional)
+- **numpy==1.26.4** - Numerical operations
+- **Pillow==10.3.0** - Image processing
+- **opencv-python==4.11.0.86** - Camera and video support
+- **torch==2.9.1** - PyTorch framework
+- **torchvision==0.24.1** - Vision utilities
 
-### What's New: YOLOv8 Face Detection
+### What's New: Multi-Model Face Detection
 
-We've replaced dlib with **YOLOv8 Face Detection** from Hugging Face:
-- ✅ **No more dlib compatibility issues!**
-- ✅ Works with Python 3.12
-- ✅ More accurate face detection
-- ✅ Faster and more modern
+We support **three face detection models**:
+- ✅ **YOLOv11** (Default) - Latest YOLO, best accuracy
+- ✅ **YOLOv8** - Stable YOLO version
+- ✅ **RetinaFace** - Deep learning with landmarks (optional)
 
-The YOLOv8 model (~6MB) will be automatically downloaded on first run.
+**No more dlib compatibility issues!** Works with Python 3.12.
+
+Models will be automatically downloaded on first use (~6-120MB each).
 
 ### Verify Installation
 
@@ -171,8 +219,14 @@ python detector.py --test -f path/to/image.jpg
 - Retrain the model after adding more images
 
 **Import errors:**
-- Make sure all dependencies are installed: `pip install -r requirements.txt`
-- Ensure CMake and gcc are properly installed
+- Make sure all dependencies are installed with exact versions: `pip install -r requirements.txt`
+- Ensure CMake 4.2.1+ and gcc are properly installed
+- Verify Python version: `python --version` (should be 3.12.7 or compatible)
+
+**Version conflicts:**
+- Use a virtual environment to avoid conflicts
+- Install exact versions from requirements.txt
+- If issues persist, try: `pip install --upgrade pip` then reinstall
 
 ## License
 
