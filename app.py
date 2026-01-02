@@ -17,15 +17,7 @@ from yolov8_detector import YOLOv8FaceDetector
 from retinaface_detector import RetinaFaceDetector
 from deepface_detector import DeepFaceDetector
 from video_utils import extract_frames_from_video, process_video_for_training, get_video_frames
-from speech_recognition_module import initialize_whisper, transcribe_audio
-from gemini_api import initialize_gemini, get_gemini_response
-
-# Lazy imports for optional dependencies
-pyaudio = None
-try:
-    import pyaudio
-except ImportError:
-    pass
+from gemini_live_api import GeminiLiveAPI
 
 # Model-specific encoding paths
 ENCODINGS_PATHS = {
@@ -126,23 +118,10 @@ class FaceRecognitionApp:
         self.camera_flip_vertical = tk.BooleanVar(value=False)
         self.camera_rotate = tk.IntVar(value=0)  # 0, 90, 180, 270 degrees
         
-        # Audio and Gemini settings
+        # Gemini Live API
         self.gemini_api_key = tk.StringVar(value="")
-        self.audio_enabled = False
-        self.audio_recording = False
-        self.audio_stream = None
-        self.pyaudio_instance = None
-        self.audio_frames = []
-        self.audio_sample_rate = 16000
-        self.audio_chunk_size = 1024
-        # Set audio format only if pyaudio is available
-        if pyaudio is not None:
-            self.audio_format = pyaudio.paInt16
-        else:
-            self.audio_format = None
-        self.audio_channels = 1
-        
-        # Load saved Gemini API key if exists
+        self.gemini_live_api: Optional[GeminiLiveAPI] = None
+        self.live_api_enabled = False
         self.load_gemini_api_key()
         
         # Model-specific data
@@ -1420,124 +1399,115 @@ class FaceRecognitionApp:
         
         camera_window = tk.Toplevel(self.root)
         camera_window.title("Live Face Recognition")
-        camera_window.geometry("1400x700")
+        camera_window.geometry("1200x800")
+        camera_window.resizable(True, True)  # Make window resizable
         camera_window.configure(bg=COLORS["bg_primary"])
+        camera_window.minsize(1000, 700)  # Set minimum size
         
-        # Main container with video and transcript side by side
+        # Main container with horizontal split
         main_container = tk.Frame(camera_window, bg=COLORS["bg_primary"])
-        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 0))
         
-        # Video frame (left side)
-        video_frame = tk.Frame(main_container, bg=COLORS["bg_secondary"])
-        video_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        # Left side: Video frame
+        left_panel = tk.Frame(main_container, bg=COLORS["bg_primary"])
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
         
-        # Video label container (for overlay button)
-        video_container = tk.Frame(video_frame, bg=COLORS["bg_secondary"])
-        video_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Video frame
+        video_frame = tk.Frame(left_panel, bg=COLORS["bg_secondary"])
+        video_frame.pack(fill=tk.BOTH, expand=True)
         
         # Video label
-        video_label = tk.Label(video_container, bg=COLORS["bg_secondary"])
-        video_label.pack(fill=tk.BOTH, expand=True)
+        video_label = tk.Label(video_frame, bg=COLORS["bg_secondary"])
+        video_label.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # Audio toggle button OVERLAY on video (top-right corner)
-        self.audio_toggle_btn_video = tk.Button(
-            video_container,
-            text="🎤 Audio: OFF",
-            bg=COLORS["warning"],
-            fg=COLORS["text_primary"],
-            activebackground=COLORS["success"],
-            activeforeground=COLORS["text_primary"],
-            command=lambda: self.toggle_audio(),
-            font=("Segoe UI", 14, "bold"),
-            relief=tk.RAISED,
-            bd=3,
-            cursor="hand2",
-            padx=20,
-            pady=12
-        )
-        # Position button in top-right corner of video
-        self.audio_toggle_btn_video.place(relx=0.98, rely=0.02, anchor=tk.NE)
+        # Right side: Live API Status Panel
+        right_panel = tk.Frame(main_container, bg=COLORS["bg_primary"], width=350)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0))
+        right_panel.pack_propagate(False)
         
-        # Transcript frame (right side)
-        transcript_frame = tk.Frame(main_container, bg=COLORS["bg_secondary"], width=400)
-        transcript_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0))
-        transcript_frame.pack_propagate(False)
-        
-        # Transcript header
-        transcript_header = tk.Frame(transcript_frame, bg=COLORS["bg_tertiary"], height=50)
-        transcript_header.pack(fill=tk.X)
-        transcript_header.pack_propagate(False)
+        # Live API Status Section
+        status_section = tk.Frame(right_panel, bg=COLORS["bg_secondary"], relief=tk.RAISED, bd=2)
+        status_section.pack(fill=tk.X, padx=5, pady=(0, 5))
         
         tk.Label(
-            transcript_header,
-            text="🎤 Live Transcription",
-            font=("Segoe UI", 14, "bold"),
-            bg=COLORS["bg_tertiary"],
-            fg=COLORS["text_primary"],
-            pady=15
-        ).pack()
+            status_section,
+            text="🎙️ Live Call Status",
+            font=("Segoe UI", 12, "bold"),
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(anchor=tk.W, padx=10, pady=(10, 5))
+        
+        # Status label
+        self.live_api_status_label = tk.Label(
+            status_section,
+            text="🔴 Disconnected",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["error"],
+            anchor=tk.W,
+            justify=tk.LEFT
+        )
+        self.live_api_status_label.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
+        # Transcript Section
+        transcript_section = tk.Frame(right_panel, bg=COLORS["bg_secondary"], relief=tk.RAISED, bd=2)
+        transcript_section.pack(fill=tk.BOTH, expand=True, padx=5, pady=(0, 5))
+        
+        tk.Label(
+            transcript_section,
+            text="💬 Conversation",
+            font=("Segoe UI", 12, "bold"),
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(anchor=tk.W, padx=10, pady=(10, 5))
         
         # Transcript text widget with scrollbar
-        transcript_scroll = tk.Scrollbar(transcript_frame)
-        transcript_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        transcript_frame = tk.Frame(transcript_section, bg=COLORS["bg_secondary"])
+        transcript_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
         
-        self.transcript_text = tk.Text(
+        scrollbar = tk.Scrollbar(transcript_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.live_api_transcript_text = tk.Text(
             transcript_frame,
             wrap=tk.WORD,
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 9),
             bg=COLORS["bg_tertiary"],
             fg=COLORS["text_primary"],
             relief=tk.FLAT,
-            padx=10,
-            pady=10,
-            yscrollcommand=transcript_scroll.set,
-            state=tk.DISABLED
+            yscrollcommand=scrollbar.set,
+            state=tk.NORMAL,
+            height=15
         )
-        self.transcript_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        transcript_scroll.config(command=self.transcript_text.yview)
+        self.live_api_transcript_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.live_api_transcript_text.yview)
         
-        # Initial message in transcript panel
-        self.transcript_text.config(state=tk.NORMAL)
-        self.transcript_text.insert("1.0", "🎤 Speech-to-Text Ready\n\n")
-        self.transcript_text.insert(tk.END, "Click the '🎤 Audio: OFF' button below to start recording.\n\n")
-        self.transcript_text.insert(tk.END, "Your speech will be transcribed here in real-time.\n\n")
-        if self.gemini_api_key.get().strip():
-            self.transcript_text.insert(tk.END, "✓ Gemini API key is set - AI responses will appear here.\n")
-        else:
-            self.transcript_text.insert(tk.END, "⚠️ No Gemini API key - Only transcription will be shown.\n")
-            self.transcript_text.insert(tk.END, "   Set your API key in Settings to enable AI chat.\n")
-        self.transcript_text.config(state=tk.DISABLED)
+        # Initial message
+        self.live_api_transcript_text.insert(tk.END, "💡 Start a Live Call to begin conversation...\n", "info")
+        self.live_api_transcript_text.tag_config("info", foreground=COLORS["text_secondary"])
+        self.live_api_transcript_text.config(state=tk.DISABLED)
         
-        # Status label at bottom of transcript
-        self.transcript_status = tk.Label(
-            transcript_frame,
-            text="🎤 Audio: OFF - Click '🎤 Audio: OFF' button to start recording",
-            font=("Segoe UI", 10, "bold"),
-            bg=COLORS["bg_secondary"],
-            fg=COLORS["warning"],
-            anchor=tk.W,
-            padx=10,
-            pady=5
-        )
-        self.transcript_status.pack(fill=tk.X, padx=10, pady=(0, 10))
+        # Control frame (bottom section - placed below main_container, not inside it)
+        control_frame = tk.Frame(camera_window, bg=COLORS["bg_secondary"])
+        control_frame.pack(fill=tk.X, padx=10, pady=(10, 10))
         
-        # Control frame
-        control_frame = tk.Frame(camera_window, bg=COLORS["bg_secondary"], height=60)
-        control_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
-        control_frame.pack_propagate(False)
+        # Top row of controls
+        top_controls = tk.Frame(control_frame, bg=COLORS["bg_secondary"])
+        top_controls.pack(fill=tk.X, padx=10, pady=10)
         
+        # Status label (left side)
         status_label = tk.Label(
-            control_frame,
+            top_controls,
             text="📹 Camera Active - Press 'Stop' to close",
             font=("Segoe UI", 11, "bold"),
             bg=COLORS["bg_secondary"],
             fg=COLORS["text_primary"]
         )
-        status_label.pack(side=tk.LEFT, padx=20, pady=15)
+        status_label.pack(side=tk.LEFT, padx=10)
         
-        # Camera controls frame
-        camera_controls_frame = tk.Frame(control_frame, bg=COLORS["bg_secondary"])
-        camera_controls_frame.pack(side=tk.LEFT, padx=20, pady=10)
+        # Camera controls (center)
+        camera_controls_frame = tk.Frame(top_controls, bg=COLORS["bg_secondary"])
+        camera_controls_frame.pack(side=tk.LEFT, padx=20, expand=True)
         
         # Flip Horizontal button
         flip_h_btn = tk.Button(
@@ -1547,11 +1517,12 @@ class FaceRecognitionApp:
             fg=COLORS["text_primary"],
             activebackground=COLORS["accent_blue"],
             command=lambda: self.camera_flip_horizontal.set(not self.camera_flip_horizontal.get()),
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 10, "bold"),
             relief=tk.RAISED,
             bd=2,
-            padx=10,
-            pady=5
+            cursor="hand2",
+            padx=12,
+            pady=6
         )
         flip_h_btn.pack(side=tk.LEFT, padx=5)
         
@@ -1563,59 +1534,71 @@ class FaceRecognitionApp:
             fg=COLORS["text_primary"],
             activebackground=COLORS["accent_blue"],
             command=lambda: self.camera_flip_vertical.set(not self.camera_flip_vertical.get()),
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 10, "bold"),
             relief=tk.RAISED,
             bd=2,
-            padx=10,
-            pady=5
+            cursor="hand2",
+            padx=12,
+            pady=6
         )
         flip_v_btn.pack(side=tk.LEFT, padx=5)
         
-        # Rotate button
+        # Rotate button (more prominent)
         rotate_btn = tk.Button(
             camera_controls_frame,
-            text="🔄 Rotate",
-            bg=COLORS["bg_tertiary"],
+            text="🔄 Rotate Camera",
+            bg=COLORS["accent_blue"],
             fg=COLORS["text_primary"],
-            activebackground=COLORS["accent_blue"],
+            activebackground=COLORS["accent_purple"],
             command=self.rotate_camera,
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 11, "bold"),
             relief=tk.RAISED,
-            bd=2,
-            padx=10,
-            pady=5
+            bd=3,
+            cursor="hand2",
+            padx=15,
+            pady=8
         )
         rotate_btn.pack(side=tk.LEFT, padx=5)
         
-        # Audio toggle button in control bar (using regular Button for better visibility)
-        self.audio_toggle_btn = tk.Button(
-            control_frame,
-            text="🎤 Audio: OFF",
+        # Right side buttons
+        right_controls = tk.Frame(top_controls, bg=COLORS["bg_secondary"])
+        right_controls.pack(side=tk.RIGHT, padx=10)
+        
+        # Gemini Live API toggle button (More Prominent)
+        self.live_api_toggle_btn = tk.Button(
+            right_controls,
+            text="🎙️ Live Call: OFF",
             bg=COLORS["warning"],
             fg=COLORS["text_primary"],
             activebackground=COLORS["success"],
             activeforeground=COLORS["text_primary"],
-            command=lambda: self.toggle_audio(),
-            font=("Segoe UI", 14, "bold"),
+            command=self.toggle_live_api,
+            font=("Segoe UI", 12, "bold"),
             relief=tk.RAISED,
-            bd=3,
+            bd=4,
             cursor="hand2",
-            padx=25,
-            pady=12
+            padx=20,
+            pady=10
         )
-        self.audio_toggle_btn.pack(side=tk.RIGHT, padx=15, pady=12)
+        self.live_api_toggle_btn.pack(side=tk.LEFT, padx=5)
         
-        stop_btn = ModernButton(
-            control_frame,
-            text="Stop",
+        # Stop button
+        stop_btn = tk.Button(
+            right_controls,
+            text="⛔ Stop",
             bg=COLORS["error"],
             fg=COLORS["text_primary"],
+            activebackground=COLORS["error"],
+            activeforeground=COLORS["text_primary"],
             command=lambda: self.stop_camera(camera_window),
-            font=("Segoe UI", 11, "bold"),
+            font=("Segoe UI", 12, "bold"),
+            relief=tk.RAISED,
+            bd=4,
+            cursor="hand2",
             padx=20,
-            pady=8
+            pady=10
         )
-        stop_btn.pack(side=tk.RIGHT, padx=20, pady=15)
+        stop_btn.pack(side=tk.LEFT, padx=5)
         
         self.camera_running = True
         self.video_capture = cv2.VideoCapture(self.camera_index.get())
@@ -1833,10 +1816,6 @@ class FaceRecognitionApp:
             if self.camera_running:
                 camera_window.after(33, update_frame)  # ~30 FPS for better performance
         
-        # Start audio recording if enabled
-        if self.audio_enabled:
-            self.start_audio_recording()
-        
         update_frame()
     
     def rotate_camera(self):
@@ -1851,362 +1830,363 @@ class FaceRecognitionApp:
         self.camera_running = False
         if self.video_capture:
             self.video_capture.release()
-        self.audio_enabled = False
-        self.stop_audio_recording()
+        
+        # Disconnect Live API if active
+        if self.live_api_enabled and self.gemini_live_api:
+            self.gemini_live_api.disconnect()
+            self.gemini_live_api = None
+            self.live_api_enabled = False
+        
         window.destroy()
     
-    def toggle_audio(self):
-        """Toggle audio recording on/off."""
-        self.audio_enabled = not self.audio_enabled
+    def toggle_live_api(self):
+        """Toggle Gemini Live API on/off."""
+        # Reload API key from settings to ensure we have the latest value
+        self.load_gemini_api_key()
         
-        if self.audio_enabled:
-            # Update both buttons
-            if hasattr(self, 'audio_toggle_btn'):
-                self.audio_toggle_btn.config(text="🎤 Audio: ON", bg=COLORS["success"], fg=COLORS["text_primary"])
-            if hasattr(self, 'audio_toggle_btn_video'):
-                self.audio_toggle_btn_video.config(text="🎤 Audio: ON", bg=COLORS["success"], fg=COLORS["text_primary"])
-            if hasattr(self, 'transcript_status'):
-                self.transcript_status.config(
-                    text="🎤 Audio: ON - Listening... Speak now!",
+        api_key = self.gemini_api_key.get().strip()
+        if not api_key:
+            messagebox.showerror(
+                "API Key Required",
+                "Please set your Gemini API key in Settings first.\n\n"
+                "Get your free API key from:\n"
+                "https://makersuite.google.com/app/apikey"
+            )
+            return
+        
+        if not self.live_api_enabled:
+            # Enable Live API
+            try:
+                # Use the current API key value
+                api_key = self.gemini_api_key.get().strip()
+                if not api_key:
+                    messagebox.showerror("Error", "API key is empty. Please set it in Settings.")
+                    return
+                
+                print(f"Connecting to Gemini Live API with key (length: {len(api_key)} characters)...")
+                self.gemini_live_api = GeminiLiveAPI(api_key)
+                
+                # Set callbacks
+                self.gemini_live_api.set_callbacks(
+                    on_connect=lambda: self.root.after(0, lambda: self._on_live_api_connect()),
+                    on_disconnect=lambda: self.root.after(0, lambda: self._on_live_api_disconnect()),
+                    on_error=lambda e: self.root.after(0, lambda err=e: self._on_live_api_error(err)),
+                    on_message=lambda msg: self.root.after(0, lambda m=msg: self._on_live_api_message(m))
+                )
+                
+                # Connect
+                self.gemini_live_api.connect()
+                
+                # Wait a moment for connection
+                self.root.after(1000, lambda: self._start_live_api_streaming())
+                
+            except Exception as e:
+                messagebox.showerror(
+                    "Live API Error",
+                    f"Failed to connect to Gemini Live API:\n{str(e)}\n\n"
+                    "Make sure:\n"
+                    "1. Your API key is valid\n"
+                    "2. PyAudio is installed: pip install pyaudio\n"
+                    "3. websockets is installed: pip install websockets"
+                )
+                if self.gemini_live_api:
+                    self.gemini_live_api.disconnect()
+                    self.gemini_live_api = None
+        else:
+            # Disable Live API
+            if self.gemini_live_api:
+                self.gemini_live_api.disconnect()
+                self.gemini_live_api = None
+            self.live_api_enabled = False
+            if hasattr(self, 'live_api_toggle_btn'):
+                self.live_api_toggle_btn.config(
+                    text="🎙️ Live Call: OFF",
+                    bg=COLORS["warning"]
+                )
+    
+    def _start_live_api_streaming(self):
+        """Start audio streaming for Live API."""
+        # Check if widgets still exist (window might be closed)
+        try:
+            if not hasattr(self, 'live_api_status_label') or not self.live_api_status_label.winfo_exists():
+                print("⚠️ Live API window closed, aborting streaming start")
+                return
+        except:
+            print("⚠️ Live API window closed, aborting streaming start")
+            return
+        
+        if self.gemini_live_api and self.gemini_live_api.is_connected:
+            try:
+                print("🎤 Starting audio streaming...")
+                self.gemini_live_api.start_streaming()
+                self.live_api_enabled = True
+                try:
+                    if hasattr(self, 'live_api_status_label') and self.live_api_status_label.winfo_exists():
+                        self.live_api_status_label.config(
+                            text="🟢 Connected - Streaming Audio...",
+                            fg=COLORS["success"]
+                        )
+                    if hasattr(self, 'live_api_toggle_btn') and self.live_api_toggle_btn.winfo_exists():
+                        self.live_api_toggle_btn.config(
+                            text="🎙️ Live Call: ON",
+                            bg=COLORS["success"]
+                        )
+                    # Update transcript
+                    self._update_live_api_transcript("🎤 Audio streaming started. You can now speak!", is_response=False)
+                except Exception as widget_error:
+                    print(f"⚠️ Widget update error (window may be closed): {widget_error}")
+                print("✓ Audio streaming started successfully")
+            except Exception as e:
+                error_msg = str(e)
+                print(f"❌ Failed to start streaming: {error_msg}")
+                try:
+                    if hasattr(self, 'live_api_status_label') and self.live_api_status_label.winfo_exists():
+                        self.live_api_status_label.config(
+                            text=f"❌ Streaming Error: {error_msg[:40]}...",
+                            fg=COLORS["error"]
+                        )
+                    messagebox.showerror("Live API Error", f"Failed to start streaming:\n{error_msg}")
+                except:
+                    pass
+                if self.gemini_live_api:
+                    self.gemini_live_api.disconnect()
+                    self.gemini_live_api = None
+        else:
+            print("⚠️ Cannot start streaming: Not connected to Live API")
+            try:
+                # Check if window still exists by trying to access a widget
+                if hasattr(self, 'live_api_status_label'):
+                    try:
+                        _ = self.live_api_status_label.winfo_exists()
+                        self.live_api_status_label.config(
+                            text="⚠️ Not Connected - Retrying...",
+                            fg=COLORS["warning"]
+                        )
+                        # Retry connection after a delay (only if window still exists)
+                        self.root.after(2000, lambda: self._start_live_api_streaming())
+                    except tk.TclError:
+                        print("⚠️ Window closed, stopping retry attempts")
+                        return
+            except Exception as e:
+                print(f"⚠️ Error checking window status: {e}")
+                return
+    
+    def _on_live_api_connect(self):
+        """Callback when Live API connects."""
+        print("✓ Connected to Gemini Live API")
+        try:
+            if hasattr(self, 'live_api_status_label') and self.live_api_status_label.winfo_exists():
+                self.live_api_status_label.config(
+                    text="🟢 Connected - Listening...",
                     fg=COLORS["success"]
                 )
-            self.start_audio_recording()
-        else:
-            # Update both buttons
-            if hasattr(self, 'audio_toggle_btn'):
-                self.audio_toggle_btn.config(text="🎤 Audio: OFF", bg=COLORS["warning"], fg=COLORS["text_primary"])
-            if hasattr(self, 'audio_toggle_btn_video'):
-                self.audio_toggle_btn_video.config(text="🎤 Audio: OFF", bg=COLORS["warning"], fg=COLORS["text_primary"])
-            if hasattr(self, 'transcript_status'):
-                self.transcript_status.config(
-                    text="🎤 Audio: OFF - Click '🎤 Audio: OFF' button to start recording",
-                    fg=COLORS["warning"]
+            if hasattr(self, 'live_api_toggle_btn') and self.live_api_toggle_btn.winfo_exists():
+                self.live_api_toggle_btn.config(
+                    text="🎙️ Live Call: ON",
+                    bg=COLORS["success"]
                 )
-            self.stop_audio_recording()
-    
-    def start_audio_recording(self):
-        """Start recording audio from microphone."""
-        if self.audio_recording:
-            return
-        
-        if pyaudio is None:
-            messagebox.showerror(
-                "Audio Error",
-                "PyAudio is not installed.\n\n"
-                "Please install it:\n"
-                "pip install pyaudio\n\n"
-                "Note: On Windows, you may need to install it via:\n"
-                "pip install pipwin\n"
-                "pipwin install pyaudio"
-            )
-            self.audio_enabled = False
-            if hasattr(self, 'audio_toggle_btn'):
-                self.audio_toggle_btn.config(text="🎤 Audio: OFF", bg=COLORS["warning"])
-            if hasattr(self, 'audio_toggle_btn_video'):
-                self.audio_toggle_btn_video.config(text="🎤 Audio: OFF", bg=COLORS["warning"])
-            return
-        
-        try:
-            self.pyaudio_instance = pyaudio.PyAudio()
-            self.audio_stream = self.pyaudio_instance.open(
-                format=self.audio_format,
-                channels=self.audio_channels,
-                rate=self.audio_sample_rate,
-                input=True,
-                frames_per_buffer=self.audio_chunk_size
-            )
-            self.audio_recording = True
-            self.audio_frames = []
-            
-            # Clear transcript when starting and show ready message
-            if hasattr(self, 'transcript_text'):
-                self.transcript_text.config(state=tk.NORMAL)
-                self.transcript_text.delete("1.0", tk.END)
-                self.transcript_text.insert("1.0", "🎤 Audio Recording Started!\n\n")
-                self.transcript_text.insert(tk.END, "Listening... Speak clearly into your microphone.\n\n")
-                self.transcript_text.insert(tk.END, "Transcription will appear here every 3 seconds...\n\n")
-                self.transcript_text.see(tk.END)
-                self.transcript_text.config(state=tk.DISABLED)
-            
-            # Start audio processing thread
-            threading.Thread(target=self.process_audio_loop, daemon=True).start()
-            print("✓ Audio recording started")
         except Exception as e:
-            print(f"Error starting audio recording: {e}")
-            messagebox.showerror("Audio Error", f"Failed to start audio recording:\n{str(e)}")
-            self.audio_enabled = False
-            if hasattr(self, 'audio_toggle_btn'):
-                self.audio_toggle_btn.config(text="🎤 Audio: OFF", bg=COLORS["warning"])
-            if hasattr(self, 'audio_toggle_btn_video'):
-                self.audio_toggle_btn_video.config(text="🎤 Audio: OFF", bg=COLORS["warning"])
-            if hasattr(self, 'transcript_status'):
-                self.transcript_status.config(text=f"❌ Error: {str(e)}")
+            print(f"⚠️ Error updating UI on connect: {e}")
     
-    def stop_audio_recording(self):
-        """Stop recording audio."""
-        self.audio_recording = False
-        
-        if self.audio_stream:
-            try:
-                self.audio_stream.stop_stream()
-                self.audio_stream.close()
-            except:
-                pass
-            self.audio_stream = None
-        
-        if self.pyaudio_instance:
-            try:
-                self.pyaudio_instance.terminate()
-            except:
-                pass
-            self.pyaudio_instance = None
-        
-        self.audio_frames = []
-        print("Audio recording stopped")
+    def _on_live_api_disconnect(self):
+        """Callback when Live API disconnects."""
+        print("✗ Disconnected from Gemini Live API")
+        self.live_api_enabled = False
+        try:
+            if hasattr(self, 'live_api_status_label') and self.live_api_status_label.winfo_exists():
+                self.live_api_status_label.config(
+                    text="🔴 Disconnected",
+                    fg=COLORS["error"]
+                )
+            if hasattr(self, 'live_api_toggle_btn') and self.live_api_toggle_btn.winfo_exists():
+                self.live_api_toggle_btn.config(
+                    text="🎙️ Live Call: OFF",
+                    bg=COLORS["warning"]
+                )
+        except Exception as e:
+            print(f"⚠️ Error updating UI on disconnect: {e}")
     
-    def process_audio_loop(self):
-        """Continuously record and process audio."""
-        import time
-        
-        while self.audio_recording and self.audio_enabled:
-            try:
-                if self.audio_stream:
-                    # Read audio data
-                    data = self.audio_stream.read(self.audio_chunk_size, exception_on_overflow=False)
-                    self.audio_frames.append(data)
+    def _on_live_api_error(self, error):
+        """Callback when Live API error occurs."""
+        error_msg = str(error)
+        print(f"❌ Live API Error: {error_msg}")
+        try:
+            if hasattr(self, 'live_api_status_label') and self.live_api_status_label.winfo_exists():
+                self.live_api_status_label.config(
+                    text=f"❌ Error: {error_msg[:50]}...",
+                    fg=COLORS["error"]
+                )
+            messagebox.showerror("Live API Error", f"An error occurred:\n{error_msg}")
+        except Exception as e:
+            print(f"⚠️ Error showing error message: {e}")
+    
+    def _on_live_api_message(self, message):
+        """Callback when Live API message is received."""
+        try:
+            # Handle different message types
+            if isinstance(message, dict):
+                # Handle text responses
+                if "text" in message:
+                    text = message["text"]
+                    print(f"💬 Gemini Response: {text}")
+                    self._update_live_api_transcript(f"Gemini: {text}", is_response=True)
+                
+                # Handle standard API response format
+                if "candidates" in message:
+                    candidates = message.get("candidates", [])
+                    for candidate in candidates:
+                        if "content" in candidate:
+                            content = candidate["content"]
+                            if "parts" in content:
+                                for part in content["parts"]:
+                                    if "text" in part:
+                                        text = part["text"]
+                                        print(f"💬 Gemini Response: {text}")
+                                        self._update_live_api_transcript(f"Gemini: {text}", is_response=True)
+                
+                # Check for server content with transcriptions or responses
+                if "serverContent" in message:
+                    server_content = message["serverContent"]
                     
-                    # Process audio every 4 seconds for better accuracy (longer context)
-                    if len(self.audio_frames) >= (self.audio_sample_rate * 4) // self.audio_chunk_size:
-                        self.process_audio_chunk()
-                        self.audio_frames = []  # Clear buffer after processing
+                    # Handle transcriptions (what user said)
+                    if "modelTurn" in server_content:
+                        model_turn = server_content["modelTurn"]
+                        if "parts" in model_turn:
+                            for part in model_turn["parts"]:
+                                if "text" in part:
+                                    text = part["text"]
+                                    print(f"📝 Gemini Response: {text}")
+                                    self._update_live_api_transcript(f"Gemini: {text}", is_response=True)
+                    
+                    # Handle user transcriptions
+                    if "clientContent" in server_content:
+                        client_content = server_content["clientContent"]
+                        if "turns" in client_content:
+                            for turn in client_content["turns"]:
+                                if "parts" in turn:
+                                    for part in turn["parts"]:
+                                        if "text" in part:
+                                            text = part["text"]
+                                            print(f"🎤 You said: {text}")
+                                            self._update_live_api_transcript(f"You: {text}", is_response=False)
                 
-                time.sleep(0.01)  # Small delay to prevent CPU overload
-            except Exception as e:
-                print(f"Error in audio loop: {e}")
-                break
-    
-    def process_audio_chunk(self):
-        """Process recorded audio chunk: transcribe and send to Gemini."""
-        if not self.audio_frames:
-            return
-        
-        try:
-            # Convert audio frames to numpy array
-            audio_data = b''.join(self.audio_frames)
-            audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
-            
-            # Normalize audio
-            if audio_np.max() > 0:
-                audio_np = audio_np / 32768.0
-            
-            # Transcribe audio with better accuracy settings
-            print("Transcribing audio...")
-            transcribed_text = transcribe_audio(audio_np, self.audio_sample_rate)
-            
-            if transcribed_text and len(transcribed_text.strip()) > 0:
-                print(f"Transcribed: {transcribed_text}")
-                
-                # Update transcript display in UI (ensure it shows in panel)
-                self.root.after(0, lambda text=transcribed_text: self.update_transcript(text))
-                
-                # Send to Gemini API if key is set
-                gemini_key = self.gemini_api_key.get().strip()
-                if gemini_key:
-                    self.root.after(0, lambda: self.send_to_gemini(transcribed_text, gemini_key))
-                else:
-                    # Just show transcribed text if no API key
-                    print("Gemini API key not set, showing transcription only")
-            else:
-                print("No speech detected in audio chunk")
-                # Update status to show listening
-                self.root.after(0, lambda: self.update_transcript_status("Listening... (no speech detected)"))
-                
+                # Update status to show activity
+                if hasattr(self, 'live_api_status_label'):
+                    current_text = self.live_api_status_label.cget("text")
+                    if "🟢" in current_text:
+                        self.live_api_status_label.config(
+                            text="🟢 Connected - Active ✨",
+                            fg=COLORS["success"]
+                        )
         except Exception as e:
-            print(f"Error processing audio chunk: {e}")
-            self.root.after(0, lambda: self.update_transcript_status(f"Error: {str(e)}"))
+            print(f"Error processing Live API message: {e}")
+            import traceback
+            traceback.print_exc()
     
-    def update_transcript(self, text):
-        """Update the transcript display with new transcribed text."""
-        if not hasattr(self, 'transcript_text'):
-            return
-        
-        try:
-            self.transcript_text.config(state=tk.NORMAL)
-            
-            # Add timestamp
-            import datetime
-            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-            
-            # Add new transcription with user tag
-            self.transcript_text.insert(tk.END, f"[{timestamp}] You: {text}\n", "user_tag")
-            self.transcript_text.insert(tk.END, "\n")
-            
-            # Configure user tag styling
-            self.transcript_text.tag_config("user_tag", foreground=COLORS["accent_blue"], font=("Segoe UI", 10, "bold"))
-            
-            # Auto-scroll to bottom
-            self.transcript_text.see(tk.END)
-            
-            self.transcript_text.config(state=tk.DISABLED)
-            
-            # Force update to ensure it's visible
-            self.root.update_idletasks()
-            
-            # Update status with more visible feedback
-            gemini_key = self.gemini_api_key.get().strip()
-            if gemini_key:
-                self.update_transcript_status("✓ Transcribed! Sending to Gemini...")
-            else:
-                self.update_transcript_status("✓ Transcribed! (No Gemini API key - transcription only)")
-                
-        except Exception as e:
-            print(f"Error updating transcript: {e}")
-    
-    def update_transcript_status(self, message):
-        """Update the transcript status label."""
-        if hasattr(self, 'transcript_status'):
-            self.transcript_status.config(text=message)
-    
-    def send_to_gemini(self, text, api_key):
-        """Send transcribed text to Gemini API and show response."""
-        def gemini_thread():
+    def _update_live_api_transcript(self, text, is_response=False):
+        """Update the transcript display in the live camera window."""
+        if hasattr(self, 'live_api_transcript_text'):
             try:
-                # Update status
-                self.root.after(0, lambda: self.update_transcript_status("🔄 Getting Gemini response..."))
+                # Enable editing
+                self.live_api_transcript_text.config(state=tk.NORMAL)
                 
-                response = get_gemini_response(text, api_key)
+                # Configure tags if not already done
+                if not hasattr(self, '_transcript_tags_configured'):
+                    self.live_api_transcript_text.tag_config("user", foreground=COLORS["accent_purple"], font=("Segoe UI", 9, "bold"))
+                    self.live_api_transcript_text.tag_config("response", foreground=COLORS["accent_blue"], font=("Segoe UI", 9, "bold"))
+                    self._transcript_tags_configured = True
                 
-                # Update transcript with Gemini response
-                self.root.after(0, lambda: self.add_gemini_response_to_transcript(response))
+                # Get current content
+                current = self.live_api_transcript_text.get("1.0", tk.END).strip()
                 
-                # Also show popup
-                self.root.after(0, lambda: self.show_gemini_response(text, response))
+                # Remove initial message if present
+                if "💡 Start a Live Call" in current:
+                    self.live_api_transcript_text.delete("1.0", tk.END)
+                    current = ""
                 
-                # Update status
-                self.root.after(0, lambda: self.update_transcript_status("✓ Gemini response received! Listening for more..."))
+                # Add new message
+                tag = "response" if is_response else "user"
+                
+                # Insert new text
+                if current:
+                    self.live_api_transcript_text.insert(tk.END, "\n")
+                self.live_api_transcript_text.insert(tk.END, text + "\n", tag)
+                
+                # Auto-scroll to bottom
+                self.live_api_transcript_text.see(tk.END)
+                
+                # Limit transcript length (keep last 50 lines)
+                lines = self.live_api_transcript_text.get("1.0", tk.END).split("\n")
+                if len(lines) > 50:
+                    self.live_api_transcript_text.delete("1.0", f"{len(lines) - 50}.0")
+                
+                # Disable editing to prevent user modification
+                self.live_api_transcript_text.config(state=tk.DISABLED)
             except Exception as e:
-                error_msg = f"Error getting Gemini response: {str(e)}"
-                self.root.after(0, lambda: self.add_gemini_response_to_transcript(f"❌ Error: {error_msg}"))
-                self.root.after(0, lambda: self.show_gemini_response(text, error_msg))
-                self.root.after(0, lambda: self.update_transcript_status(f"❌ Error: {error_msg}"))
-        
-        threading.Thread(target=gemini_thread, daemon=True).start()
+                print(f"Error updating transcript: {e}")
+                import traceback
+                traceback.print_exc()
     
-    def add_gemini_response_to_transcript(self, response):
-        """Add Gemini response to the transcript display."""
-        if not hasattr(self, 'transcript_text'):
-            return
-        
+    def load_gemini_api_key(self):
+        """Load Gemini API key from file if exists."""
         try:
-            self.transcript_text.config(state=tk.NORMAL)
-            
-            # Add Gemini response with formatting
-            import datetime
-            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-            
-            self.transcript_text.insert(tk.END, f"[{timestamp}] 🤖 Gemini: {response}\n\n")
-            self.transcript_text.insert(tk.END, "-" * 50 + "\n\n")
-            
-            # Auto-scroll to bottom
-            self.transcript_text.see(tk.END)
-            
-            self.transcript_text.config(state=tk.DISABLED)
-                
+            key_file = Path("output/gemini_api_key.txt")
+            if key_file.exists():
+                with key_file.open("r", encoding="utf-8") as f:
+                    api_key = f.read().strip()
+                    if api_key:
+                        self.gemini_api_key.set(api_key)
+                        print(f"✓ Gemini API key loaded successfully (length: {len(api_key)} characters)")
+                        print(f"   File location: {key_file.absolute()}")
+                        return True
+                    else:
+                        print("⚠️ API key file exists but is empty")
+                        self.gemini_api_key.set("")  # Set to empty
+                        return False
+            else:
+                print(f"ℹ️ No saved API key found at: {key_file.absolute()}")
+                print("   Please set it in Settings.")
+                return False
         except Exception as e:
-            print(f"Error adding Gemini response to transcript: {e}")
+            print(f"❌ Error loading Gemini API key: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
-    def show_gemini_response(self, user_text, gemini_response):
-        """Show Gemini response in a popup window."""
-        response_window = tk.Toplevel(self.root)
-        response_window.title("Gemini Response")
-        response_window.geometry("600x500")
-        response_window.configure(bg=COLORS["bg_primary"])
-        
-        # Header
-        header = tk.Frame(response_window, bg=COLORS["bg_secondary"], height=60)
-        header.pack(fill=tk.X)
-        header.pack_propagate(False)
-        
-        tk.Label(
-            header,
-            text="🤖 Gemini Response",
-            font=("Segoe UI", 16, "bold"),
-            bg=COLORS["bg_secondary"],
-            fg=COLORS["text_primary"],
-            pady=15
-        ).pack()
-        
-        # Content frame
-        content = tk.Frame(response_window, bg=COLORS["bg_primary"])
-        content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        
-        # User message
-        tk.Label(
-            content,
-            text="You said:",
-            font=("Segoe UI", 10, "bold"),
-            bg=COLORS["bg_primary"],
-            fg=COLORS["text_secondary"],
-            anchor=tk.W
-        ).pack(fill=tk.X, pady=(0, 5))
-        
-        user_frame = tk.Frame(content, bg=COLORS["bg_secondary"], relief=tk.FLAT)
-        user_frame.pack(fill=tk.X, pady=(0, 15))
-        
-        user_text_widget = tk.Text(
-            user_frame,
-            height=3,
-            wrap=tk.WORD,
-            font=("Segoe UI", 10),
-            bg=COLORS["bg_tertiary"],
-            fg=COLORS["text_primary"],
-            relief=tk.FLAT,
-            padx=10,
-            pady=10
-        )
-        user_text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        user_text_widget.insert("1.0", user_text)
-        user_text_widget.config(state=tk.DISABLED)
-        
-        # Gemini response
-        tk.Label(
-            content,
-            text="Gemini replied:",
-            font=("Segoe UI", 10, "bold"),
-            bg=COLORS["bg_primary"],
-            fg=COLORS["text_secondary"],
-            anchor=tk.W
-        ).pack(fill=tk.X, pady=(0, 5))
-        
-        response_frame = tk.Frame(content, bg=COLORS["bg_secondary"], relief=tk.FLAT)
-        response_frame.pack(fill=tk.BOTH, expand=True)
-        
-        response_text_widget = tk.Text(
-            response_frame,
-            wrap=tk.WORD,
-            font=("Segoe UI", 10),
-            bg=COLORS["bg_tertiary"],
-            fg=COLORS["text_primary"],
-            relief=tk.FLAT,
-            padx=10,
-            pady=10
-        )
-        response_text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        response_text_widget.insert("1.0", gemini_response)
-        response_text_widget.config(state=tk.DISABLED)
-        
-        # Close button
-        close_btn = ModernButton(
-            content,
-            text="Close",
-            bg=COLORS["accent_blue"],
-            fg=COLORS["text_primary"],
-            command=response_window.destroy,
-            font=("Segoe UI", 11, "bold"),
-            padx=20,
-            pady=8
-        )
-        close_btn.pack(pady=(15, 0))
+    def save_gemini_api_key(self):
+        """Save Gemini API key to file."""
+        try:
+            output_dir = Path("output")
+            output_dir.mkdir(exist_ok=True)
+            key_file = output_dir / "gemini_api_key.txt"
+            api_key = self.gemini_api_key.get().strip()
+            
+            # Write the API key to file
+            with key_file.open("w", encoding="utf-8") as f:
+                f.write(api_key)
+            
+            # Verify it was written correctly
+            if key_file.exists():
+                with key_file.open("r", encoding="utf-8") as f:
+                    saved_key = f.read().strip()
+                if saved_key == api_key:
+                    if api_key:
+                        print(f"✓ Gemini API key saved and verified successfully (length: {len(api_key)} characters)")
+                        print(f"   File location: {key_file.absolute()}")
+                    else:
+                        print(f"✓ API key cleared (file updated)")
+                    return True
+                else:
+                    print(f"⚠️ Warning: API key verification failed - saved: '{saved_key[:10]}...', expected: '{api_key[:10] if api_key else '(empty)'}...'")
+                    return False
+            else:
+                print(f"⚠️ Warning: API key file was not created at {key_file.absolute()}")
+                return False
+        except Exception as e:
+            print(f"❌ Error saving Gemini API key: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
     def test_image(self):
         """Test recognition on a single image or video."""
@@ -2631,7 +2611,7 @@ class FaceRecognitionApp:
         """Show settings window with modern dark theme."""
         window = tk.Toplevel(self.root)
         window.title("Settings")
-        window.geometry("600x550")
+        window.geometry("550x600")
         window.configure(bg=COLORS["bg_primary"])
         window.transient(self.root)  # Make it modal
         window.grab_set()  # Focus on this window
@@ -2731,35 +2711,52 @@ class FaceRecognitionApp:
         ).pack(anchor=tk.W, padx=10)
         
         # Gemini API Key Section (More Prominent)
-        gemini_frame = tk.Frame(content, bg=COLORS["bg_secondary"], relief=tk.FLAT, bd=2)
-        gemini_frame.pack(pady=20, padx=0, fill=tk.X)
-        
-        # Header with icon
-        gemini_header = tk.Frame(gemini_frame, bg=COLORS["accent_blue"], height=40)
-        gemini_header.pack(fill=tk.X)
-        gemini_header.pack_propagate(False)
+        gemini_header_frame = tk.Frame(content, bg=COLORS["accent_blue"], relief=tk.FLAT)
+        gemini_header_frame.pack(pady=15, padx=0, fill=tk.X)
         
         tk.Label(
-            gemini_header,
-            text="🤖 Gemini API Key (For Voice Chat)",
+            gemini_header_frame,
+            text="🤖 Gemini API Key (For Live Voice Calls)",
             font=("Segoe UI", 12, "bold"),
             bg=COLORS["accent_blue"],
-            fg=COLORS["text_primary"]
-        ).pack(pady=10)
+            fg=COLORS["text_primary"],
+            pady=10
+        ).pack(anchor=tk.W, padx=15)
         
-        # Instructions
+        gemini_frame = tk.Frame(content, bg=COLORS["bg_secondary"], relief=tk.FLAT)
+        gemini_frame.pack(padx=0, fill=tk.X)
+        
+        tk.Label(
+            gemini_frame,
+            text="Enter your Google Gemini API key to enable live voice calls:",
+            font=("Segoe UI", 9),
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_secondary"]
+        ).pack(anchor=tk.W, padx=20, pady=(15, 5))
+        
         tk.Label(
             gemini_frame,
             text="Get your free API key from: https://makersuite.google.com/app/apikey",
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 8),
             bg=COLORS["bg_secondary"],
             fg=COLORS["text_secondary"],
             cursor="hand2"
-        ).pack(anchor=tk.W, padx=20, pady=(15, 5))
+        ).pack(anchor=tk.W, padx=20, pady=(0, 10))
         
-        # Entry field
+        # API Key Entry (More Visible)
+        entry_frame = tk.Frame(gemini_frame, bg=COLORS["bg_secondary"])
+        entry_frame.pack(fill=tk.X, padx=20, pady=(0, 10))
+        
+        tk.Label(
+            entry_frame,
+            text="API Key:",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"]
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
         gemini_entry = tk.Entry(
-            gemini_frame,
+            entry_frame,
             textvariable=self.gemini_api_key,
             font=("Segoe UI", 11),
             bg=COLORS["bg_tertiary"],
@@ -2767,26 +2764,63 @@ class FaceRecognitionApp:
             insertbackground=COLORS["text_primary"],
             relief=tk.FLAT,
             show="*",  # Hide API key
-            width=50
+            width=45
         )
-        gemini_entry.pack(fill=tk.X, padx=20, pady=(5, 10))
+        gemini_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         
-        # Status indicator
-        api_status = tk.Label(
+        # Show/Hide toggle button
+        def toggle_show_key():
+            if gemini_entry.cget("show") == "*":
+                gemini_entry.config(show="")
+                show_btn.config(text="👁️ Hide")
+            else:
+                gemini_entry.config(show="*")
+                show_btn.config(text="👁️ Show")
+        
+        show_btn = tk.Button(
+            entry_frame,
+            text="👁️ Show",
+            command=toggle_show_key,
+            font=("Segoe UI", 8),
+            bg=COLORS["bg_tertiary"],
+            fg=COLORS["text_primary"],
+            relief=tk.FLAT,
+            padx=8,
+            pady=2
+        )
+        show_btn.pack(side=tk.LEFT)
+        
+        # API Key Status
+        api_key_status_text = "✓ API key is set" if self.gemini_api_key.get().strip() else "⚠️ API key not set"
+        api_key_status_color = COLORS["success"] if self.gemini_api_key.get().strip() else COLORS["warning"]
+        
+        status_label = tk.Label(
             gemini_frame,
-            text="⚠️ API key not set - Voice chat will show transcription only",
-            font=("Segoe UI", 9, "italic"),
+            text=api_key_status_text,
+            font=("Segoe UI", 9, "bold"),
             bg=COLORS["bg_secondary"],
-            fg=COLORS["warning"]
+            fg=api_key_status_color
         )
-        api_status.pack(anchor=tk.W, padx=20, pady=(0, 15))
+        status_label.pack(anchor=tk.W, padx=20, pady=(0, 15))
         
-        # Update status based on current key
-        if self.gemini_api_key.get().strip():
-            api_status.config(
-                text="✓ API key is set - Voice chat enabled",
-                fg=COLORS["success"]
-            )
+        # Update status when entry changes and auto-save
+        def update_status(*args):
+            api_key_status_text = "✓ API key is set" if self.gemini_api_key.get().strip() else "⚠️ API key not set"
+            api_key_status_color = COLORS["success"] if self.gemini_api_key.get().strip() else COLORS["warning"]
+            status_label.config(text=api_key_status_text, fg=api_key_status_color)
+            
+            # Auto-save when API key changes (with small delay to avoid too many saves)
+            if hasattr(self, '_save_timer'):
+                try:
+                    self.root.after_cancel(self._save_timer)
+                except:
+                    pass
+            # Only auto-save if key is not empty (to avoid clearing on startup)
+            if self.gemini_api_key.get().strip():
+                self._save_timer = self.root.after(500, lambda: self.save_gemini_api_key())  # Save 500ms after last change
+        
+        # Trace the variable to auto-save on changes
+        self.gemini_api_key.trace("w", update_status)
         
         close_btn = ModernButton(
             content,
@@ -2800,39 +2834,50 @@ class FaceRecognitionApp:
         )
         close_btn.pack(pady=20)
     
-    def load_gemini_api_key(self):
-        """Load Gemini API key from file if exists."""
-        try:
-            key_file = Path("output/gemini_api_key.txt")
-            if key_file.exists():
-                with key_file.open("r") as f:
-                    self.gemini_api_key.set(f.read().strip())
-        except Exception as e:
-            print(f"Error loading Gemini API key: {e}")
-    
-    def save_gemini_api_key(self):
-        """Save Gemini API key to file."""
-        try:
-            output_dir = Path("output")
-            output_dir.mkdir(exist_ok=True)
-            key_file = output_dir / "gemini_api_key.txt"
-            with key_file.open("w") as f:
-                f.write(self.gemini_api_key.get().strip())
-        except Exception as e:
-            print(f"Error saving Gemini API key: {e}")
-    
     def save_settings(self, window):
         """Save settings and close window."""
-        # Save Gemini API key
-        self.save_gemini_api_key()
+        # Always save Gemini API key when Settings closes (explicit save)
+        print("=" * 50)
+        print("Saving API key from Settings window...")
+        saved = self.save_gemini_api_key()
+        print("=" * 50)
         
-        window.destroy()
-        messagebox.showinfo("Success", "Settings saved!")
+        if saved:
+            window.destroy()
+            messagebox.showinfo(
+                "Success", 
+                "Settings saved successfully!\n\n"
+                "API key has been saved and will persist when you restart the app.\n\n"
+                f"File location: output/gemini_api_key.txt"
+            )
+        else:
+            # Still close but warn user
+            response = messagebox.askyesno(
+                "Save Warning",
+                "There was an issue saving the API key.\n\n"
+                "Do you want to close anyway?\n"
+                "(You can try saving again later)"
+            )
+            if response:
+                window.destroy()
 
 
 def main():
     root = tk.Tk()
     app = FaceRecognitionApp(root)
+    
+    # Save API key when app closes
+    def on_closing():
+        # Save API key before closing (always save, even if empty)
+        print("Saving API key before app closes...")
+        try:
+            app.save_gemini_api_key()
+            print("✓ API key saved on app close")
+        except Exception as e:
+            print(f"⚠️ Error saving API key on close: {e}")
+        root.destroy()
+    
+    root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
 
 

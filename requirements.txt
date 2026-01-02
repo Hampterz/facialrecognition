@@ -18,14 +18,8 @@ opencv-python==4.11.0.86
 torch==2.9.1
 torchvision==0.24.1
 
-# Speech recognition and audio (Distil-Whisper) - Optional
-# Install these for speech-to-text features
-transformers>=4.39.0
-accelerate>=0.20.0
-datasets[audio]>=2.14.0
-soundfile>=0.12.0
+# Gemini Live API (Client-to-Server)
+websockets>=12.0
 pyaudio>=0.2.14
+google-genai>=0.2.0
 
-# Gemini API - Optional
-# Install for AI voice chat features
-google-generativeai>=0.3.0

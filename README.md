@@ -1,6 +1,6 @@
-# Face Recognition System with AI Voice Chat
+# Face Recognition System with Live Voice Calls
 
-A comprehensive Python-based face recognition system with a modern GUI that can recognize faces from static images and live camera feed. Features include real-time speech-to-text transcription, AI chat integration with Google Gemini, and advanced facial analysis (emotion, age, gender, race detection).
+A comprehensive Python-based face recognition system with a modern GUI that can recognize faces from static images and live camera feed. Features include advanced facial analysis (emotion, age, gender, race detection), support for multiple face detection models, and real-time voice conversations with Google Gemini Live API.
 
 ## Features
 
@@ -10,10 +10,8 @@ A comprehensive Python-based face recognition system with a modern GUI that can 
 - 🖼️ **Test Images/Videos** - Test recognition on single images or video files
 - 👥 **Manage People** - View and delete registered people
 - ⚙️ **Settings** - Configure camera, model, and API keys
-- 🎤 **Speech-to-Text** - Real-time audio transcription using Distil-Whisper
-- 🤖 **AI Chat Integration** - Connect with Google Gemini API for voice chat
-- 📝 **Live Transcription Panel** - See your speech transcribed in real-time
 - 🎭 **Emotion/Age/Race Analysis** - DeepFace model provides detailed facial analysis
+- 🎙️ **Live Voice Calls** - Real-time voice conversations with Google Gemini Live API (client-to-server)
 
 ## Prerequisites
 
@@ -110,15 +108,11 @@ This will install the following **exact versions** (tested and working):
 - **torch==2.9.1** - PyTorch framework
 - **torchvision==0.24.1** - Vision utilities
 
-**Speech Recognition (Distil-Whisper) - Optional:**
-- **transformers>=4.39.0** - Hugging Face Transformers (for Distil-Whisper)
-- **accelerate>=0.20.0** - Model acceleration
-- **datasets[audio]>=2.14.0** - Audio dataset handling
-- **soundfile>=0.12.0** - Audio file I/O
-- **pyaudio>=0.2.14** - Microphone audio capture
+**Gemini Live API (Client-to-Server) - Optional:**
+- **websockets>=12.0** - WebSocket client for Live API
+- **pyaudio>=0.2.14** - Audio input/output for voice calls
+- **google-generativeai>=0.8.6** - Google Gemini API SDK
 
-**AI Integration - Optional:**
-- **google-generativeai>=0.3.0** - Google Gemini API (for voice chat)
 
 ### What's New: Multi-Model Face Detection
 
@@ -163,12 +157,11 @@ facial-recognition/
 │   ├── person1.jpg
 │   └── person2.jpg
 │
-├── output/            # Generated encodings and API keys
+├── output/            # Generated encodings
 │   ├── encodings_yolov11.pkl
 │   ├── encodings_yolov8.pkl
 │   ├── encodings_retinaface.pkl
-│   ├── encodings_deepface.pkl
-│   └── gemini_api_key.txt
+│   └── encodings_deepface.pkl
 │
 ├── models/            # Downloaded YOLO models (auto-created)
 │   └── yolov11n_face_detection.pt
@@ -180,8 +173,6 @@ facial-recognition/
 ├── yolov8_detector.py         # YOLOv8 detector
 ├── retinaface_detector.py     # RetinaFace detector
 ├── deepface_detector.py       # DeepFace detector with analysis
-├── speech_recognition_module.py # Distil-Whisper speech-to-text
-├── gemini_api.py              # Google Gemini API integration
 ├── video_utils.py             # Video processing utilities
 ├── requirements.txt           # All dependencies with exact versions
 └── README.md                  # This file
@@ -216,22 +207,23 @@ facial-recognition/
 3. **Start Live Recognition:**
    - Select your preferred model from the homepage dropdown (or keep default YOLOv11)
    - Click "📹 Live Camera Recognition" on the homepage
-   - The camera window will open with video on the left and transcription panel on the right
    - Walk in front of the camera - your name will appear when recognized
    - **With DeepFace model:** You'll see emotion, age, gender, and race analysis in the top-left overlay
+   - Use camera controls to flip or rotate the camera feed
+   - **Live Voice Calls:** Click "🎙️ Live Call: OFF" to start a real-time voice conversation with Gemini
    - Click "Stop" to close the camera
 
-4. **Voice Chat Features (Speech-to-Text + Gemini):**
-   - **Enable Audio:** Click "🎤 Audio: OFF" button in the camera window to turn it ON
-   - **Speak:** Your speech will be transcribed in real-time in the right-side panel
-   - **Gemini Integration:** If you've set your Gemini API key in Settings, your transcribed speech will be sent to Gemini and you'll see the response
-   - **Without API Key:** You'll still see your transcribed text, but no AI responses
-   - **Get Gemini API Key:** Visit [Google AI Studio](https://makersuite.google.com/app/apikey) to get your free API key
+4. **Live Voice Calls with Gemini:**
+   - **Setup:** Enter your Gemini API key in Settings (get free key from https://makersuite.google.com/app/apikey)
+   - **Start Call:** Click "🎙️ Live Call: OFF" button in the camera window to enable
+   - **Speak:** Talk naturally - Gemini will respond in real-time
+   - **Features:** Low-latency bidirectional audio, voice activity detection, natural conversations
+   - **Requirements:** PyAudio and websockets must be installed
 
 5. **Other Features:**
    - **Test Image/Video**: Test recognition on a single image or video file (with DeepFace analysis if using DeepFace model)
    - **View Registered People**: See all people in your trained model
-   - **Settings**: Configure camera index and Gemini API key
+   - **Settings**: Configure camera index and encoding model
    - **Model Selection**: Switch between YOLOv11, YOLOv8, RetinaFace, and DeepFace models
    - **Incremental Training**: Only new photos are processed on subsequent training runs
    - **Folder Import**: Import entire folders with subfolders (each subfolder = one person)
@@ -290,22 +282,18 @@ python detector.py --test -f path/to/image.jpg
 - Make sure all dependencies are installed with exact versions: `pip install -r requirements.txt`
 - Ensure CMake 4.2.1+ and gcc are properly installed
 - Verify Python version: `python --version` (should be 3.12.7 or compatible)
-- For PyAudio on Windows: You may need `pip install pipwin` then `pipwin install pyaudio`
-
-**Audio/Speech recognition not working:**
-- Make sure PyAudio is installed: `pip install pyaudio` (or `pipwin install pyaudio` on Windows)
-- Check microphone permissions in your system settings
-- Verify Distil-Whisper model downloads correctly (first use will download ~800MB)
-
-**Gemini API errors:**
-- Make sure `google-generativeai` is installed: `pip install google-generativeai`
-- Verify your API key is correct in Settings
-- Check your API quota at [Google AI Studio](https://makersuite.google.com/app/apikey)
 
 **Version conflicts:**
 - Use a virtual environment to avoid conflicts
 - Install exact versions from requirements.txt
 - If issues persist, try: `pip install --upgrade pip` then reinstall
+
+**Live API not working:**
+- Make sure PyAudio is installed: `pip install pyaudio` (or `pipwin install pyaudio` on Windows)
+- Install websockets: `pip install websockets`
+- Verify your Gemini API key is correct in Settings
+- Check microphone permissions in your system settings
+- Use headphones to prevent echo/feedback
 
 ## New Features Summary
 
@@ -316,17 +304,13 @@ python detector.py --test -f path/to/image.jpg
 - Race/ethnicity analysis
 - Real-time overlay in camera window
 
-### 🎤 Speech-to-Text (Distil-Whisper)
-- Real-time audio transcription
-- Live transcription panel in camera window
-- Automatic processing every 3 seconds
-- Works offline (no internet required for transcription)
-
-### 🤖 AI Chat (Google Gemini)
-- Voice-to-AI chat integration
-- Automatic transcription → Gemini → Response
-- Responses shown in transcription panel and popup
-- Free API tier available
+### 🎙️ Live Voice Calls (Gemini Live API)
+- Real-time bidirectional voice conversations
+- Client-to-server WebSocket connection
+- Low-latency audio streaming (16kHz input, 24kHz output)
+- Voice Activity Detection (VAD) for natural interruptions
+- Native audio output with natural speech
+- Works seamlessly with face recognition
 
 ### 📁 Enhanced Training
 - Folder import (subfolders = people)
