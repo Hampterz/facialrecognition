@@ -83,17 +83,34 @@ brew install cmake
 pip install -r requirements.txt
 ```
 
-This installs:
+This installs all dependencies with exact versions:
+
+**Core Face Detection:**
 - ultralytics==8.3.245
 - huggingface-hub==0.36.0
 - supervision==0.27.0
 - face-recognition==1.3.0
 - retina-face==0.0.17
+- deepface==0.0.96
+
+**Image Processing:**
 - numpy==1.26.4
 - Pillow==10.3.0
 - opencv-python==4.11.0.86
+
+**Deep Learning:**
 - torch==2.9.1
 - torchvision==0.24.1
+
+**Speech Recognition:**
+- transformers==4.51.3
+- accelerate==1.1.1
+- datasets==3.1.0
+- soundfile==0.12.1
+- pyaudio==0.2.14
+
+**AI Integration:**
+- google-generativeai==0.8.6
 
 ### 6. Verify Installation
 
@@ -135,6 +152,32 @@ pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorc
 pip install cmake
 pip install dlib
 pip install face-recognition==1.3.0
+```
+
+### Issue: "PyAudio installation fails on Windows"
+**Solution:**
+```bash
+# Use pipwin for Windows
+pip install pipwin
+pipwin install pyaudio
+
+# Or install manually from: https://www.lfd.uci.edu/~gohlke/pythonlibs/#pyaudio
+```
+
+### Issue: "transformers or accelerate installation fails"
+**Solution:**
+```bash
+# Upgrade pip first
+pip install --upgrade pip setuptools wheel
+
+# Then install
+pip install transformers==4.51.3 accelerate==1.1.1
+```
+
+### Issue: "google-generativeai not found"
+**Solution:**
+```bash
+pip install google-generativeai==0.8.6
 ```
 
 ### Issue: Version conflicts

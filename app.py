@@ -15,13 +15,24 @@ import numpy as np
 from yolo_face_detector import YOLOFaceDetector
 from yolov8_detector import YOLOv8FaceDetector
 from retinaface_detector import RetinaFaceDetector
+from deepface_detector import DeepFaceDetector
 from video_utils import extract_frames_from_video, process_video_for_training, get_video_frames
+from speech_recognition_module import initialize_whisper, transcribe_audio
+from gemini_api import initialize_gemini, get_gemini_response
+
+# Lazy imports for optional dependencies
+pyaudio = None
+try:
+    import pyaudio
+except ImportError:
+    pass
 
 # Model-specific encoding paths
 ENCODINGS_PATHS = {
     "yolov8": Path("output/encodings_yolov8.pkl"),
     "yolov11": Path("output/encodings_yolov11.pkl"),
     "retinaface": Path("output/encodings_retinaface.pkl"),
+    "deepface": Path("output/encodings_deepface.pkl"),
 }
 
 # Processed files paths for each model
@@ -29,6 +40,7 @@ PROCESSED_FILES_PATHS = {
     "yolov8": Path("output/processed_files_yolov8.pkl"),
     "yolov11": Path("output/processed_files_yolov11.pkl"),
     "retinaface": Path("output/processed_files_retinaface.pkl"),
+    "deepface": Path("output/processed_files_deepface.pkl"),
 }
 
 # Default model
@@ -110,6 +122,28 @@ class FaceRecognitionApp:
         self.camera_running = False
         self.video_capture = None
         self.video_processing = False
+        self.camera_flip_horizontal = tk.BooleanVar(value=False)
+        self.camera_flip_vertical = tk.BooleanVar(value=False)
+        self.camera_rotate = tk.IntVar(value=0)  # 0, 90, 180, 270 degrees
+        
+        # Audio and Gemini settings
+        self.gemini_api_key = tk.StringVar(value="")
+        self.audio_enabled = False
+        self.audio_recording = False
+        self.audio_stream = None
+        self.pyaudio_instance = None
+        self.audio_frames = []
+        self.audio_sample_rate = 16000
+        self.audio_chunk_size = 1024
+        # Set audio format only if pyaudio is available
+        if pyaudio is not None:
+            self.audio_format = pyaudio.paInt16
+        else:
+            self.audio_format = None
+        self.audio_channels = 1
+        
+        # Load saved Gemini API key if exists
+        self.load_gemini_api_key()
         
         # Model-specific data
         self.loaded_encodings = {}  # Dict: {model_name: encodings}
@@ -196,6 +230,13 @@ class FaceRecognitionApp:
                 except ImportError:
                     raise ImportError(
                         "RetinaFace is not installed. Please install it with: pip install retina-face"
+                    )
+            elif model_name == "deepface":
+                try:
+                    self.detectors[model_name] = DeepFaceDetector()
+                except ImportError:
+                    raise ImportError(
+                        "DeepFace is not installed. Please install it with: pip install deepface"
                     )
         
         return self.detectors[model_name]
@@ -297,7 +338,8 @@ class FaceRecognitionApp:
             desc_map = {
                 "yolov11": "Latest YOLO, best accuracy",
                 "yolov8": "Stable YOLO version",
-                "retinaface": "Deep learning with landmarks"
+                "retinaface": "Deep learning with landmarks",
+                "deepface": "Face recognition + Emotion/Age/Race/Gender"
             }
             model_desc_home.config(text=desc_map.get(model_name, ""))
             # Unload other models
@@ -593,6 +635,19 @@ class FaceRecognitionApp:
             retinaface_available = False
             retinaface_error = f"{type(e).__name__}: {str(e)}"
         
+        # Check if DeepFace is available
+        deepface_available = False
+        deepface_error = None
+        try:
+            import deepface
+            deepface_available = True
+        except ImportError as e:
+            deepface_available = False
+            deepface_error = str(e)
+        except Exception as e:
+            deepface_available = False
+            deepface_error = f"{type(e).__name__}: {str(e)}"
+        
         model_options = [
             ("YOLOv11", "yolov11", "Latest YOLO, best accuracy"),
             ("YOLOv8", "yolov8", "Stable YOLO version"),
@@ -606,6 +661,11 @@ class FaceRecognitionApp:
                 model_options.append(("RetinaFace (Needs tf-keras)", "retinaface", "Install: pip install tf-keras"))
             else:
                 model_options.append(("RetinaFace (Not Available)", "retinaface", "Check dependencies"))
+        
+        if deepface_available:
+            model_options.append(("DeepFace", "deepface", "Face recognition + Emotion/Age/Race/Gender"))
+        else:
+            model_options.append(("DeepFace (Not Installed)", "deepface", "Install: pip install deepface"))
         
         # Model combo for training page
         model_combo = ttk.Combobox(
@@ -1046,6 +1106,26 @@ class FaceRecognitionApp:
                     "Please use YOLOv8 or YOLOv11 instead."
                 )
                 return
+        elif model_name == "deepface":
+            try:
+                # Just verify import, don't create detector yet
+                import deepface
+            except ImportError as e:
+                messagebox.showerror(
+                    "DeepFace Not Installed",
+                    "DeepFace package is not installed.\n\n"
+                    "Please install it first:\n"
+                    "pip install deepface\n\n"
+                    "Or select a different model (YOLOv8, YOLOv11, or RetinaFace)."
+                )
+                return
+            except Exception as e:
+                messagebox.showerror(
+                    "DeepFace Error",
+                    f"DeepFace cannot be used:\n\n{str(e)}\n\n"
+                    "Please use YOLOv8, YOLOv11, or RetinaFace instead."
+                )
+                return
         
         self.training_status.config(text="Training in progress... Please wait.", fg=COLORS["warning"])
         self.root.update_idletasks()  # Use update_idletasks instead of update for better performance
@@ -1340,12 +1420,106 @@ class FaceRecognitionApp:
         
         camera_window = tk.Toplevel(self.root)
         camera_window.title("Live Face Recognition")
-        camera_window.geometry("900x700")
+        camera_window.geometry("1400x700")
         camera_window.configure(bg=COLORS["bg_primary"])
         
+        # Main container with video and transcript side by side
+        main_container = tk.Frame(camera_window, bg=COLORS["bg_primary"])
+        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Video frame (left side)
+        video_frame = tk.Frame(main_container, bg=COLORS["bg_secondary"])
+        video_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        
+        # Video label container (for overlay button)
+        video_container = tk.Frame(video_frame, bg=COLORS["bg_secondary"])
+        video_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
         # Video label
-        video_label = tk.Label(camera_window, bg=COLORS["bg_secondary"])
-        video_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        video_label = tk.Label(video_container, bg=COLORS["bg_secondary"])
+        video_label.pack(fill=tk.BOTH, expand=True)
+        
+        # Audio toggle button OVERLAY on video (top-right corner)
+        self.audio_toggle_btn_video = tk.Button(
+            video_container,
+            text="🎤 Audio: OFF",
+            bg=COLORS["warning"],
+            fg=COLORS["text_primary"],
+            activebackground=COLORS["success"],
+            activeforeground=COLORS["text_primary"],
+            command=lambda: self.toggle_audio(),
+            font=("Segoe UI", 14, "bold"),
+            relief=tk.RAISED,
+            bd=3,
+            cursor="hand2",
+            padx=20,
+            pady=12
+        )
+        # Position button in top-right corner of video
+        self.audio_toggle_btn_video.place(relx=0.98, rely=0.02, anchor=tk.NE)
+        
+        # Transcript frame (right side)
+        transcript_frame = tk.Frame(main_container, bg=COLORS["bg_secondary"], width=400)
+        transcript_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0))
+        transcript_frame.pack_propagate(False)
+        
+        # Transcript header
+        transcript_header = tk.Frame(transcript_frame, bg=COLORS["bg_tertiary"], height=50)
+        transcript_header.pack(fill=tk.X)
+        transcript_header.pack_propagate(False)
+        
+        tk.Label(
+            transcript_header,
+            text="🎤 Live Transcription",
+            font=("Segoe UI", 14, "bold"),
+            bg=COLORS["bg_tertiary"],
+            fg=COLORS["text_primary"],
+            pady=15
+        ).pack()
+        
+        # Transcript text widget with scrollbar
+        transcript_scroll = tk.Scrollbar(transcript_frame)
+        transcript_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.transcript_text = tk.Text(
+            transcript_frame,
+            wrap=tk.WORD,
+            font=("Segoe UI", 10),
+            bg=COLORS["bg_tertiary"],
+            fg=COLORS["text_primary"],
+            relief=tk.FLAT,
+            padx=10,
+            pady=10,
+            yscrollcommand=transcript_scroll.set,
+            state=tk.DISABLED
+        )
+        self.transcript_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        transcript_scroll.config(command=self.transcript_text.yview)
+        
+        # Initial message in transcript panel
+        self.transcript_text.config(state=tk.NORMAL)
+        self.transcript_text.insert("1.0", "🎤 Speech-to-Text Ready\n\n")
+        self.transcript_text.insert(tk.END, "Click the '🎤 Audio: OFF' button below to start recording.\n\n")
+        self.transcript_text.insert(tk.END, "Your speech will be transcribed here in real-time.\n\n")
+        if self.gemini_api_key.get().strip():
+            self.transcript_text.insert(tk.END, "✓ Gemini API key is set - AI responses will appear here.\n")
+        else:
+            self.transcript_text.insert(tk.END, "⚠️ No Gemini API key - Only transcription will be shown.\n")
+            self.transcript_text.insert(tk.END, "   Set your API key in Settings to enable AI chat.\n")
+        self.transcript_text.config(state=tk.DISABLED)
+        
+        # Status label at bottom of transcript
+        self.transcript_status = tk.Label(
+            transcript_frame,
+            text="🎤 Audio: OFF - Click '🎤 Audio: OFF' button to start recording",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["warning"],
+            anchor=tk.W,
+            padx=10,
+            pady=5
+        )
+        self.transcript_status.pack(fill=tk.X, padx=10, pady=(0, 10))
         
         # Control frame
         control_frame = tk.Frame(camera_window, bg=COLORS["bg_secondary"], height=60)
@@ -1360,6 +1534,76 @@ class FaceRecognitionApp:
             fg=COLORS["text_primary"]
         )
         status_label.pack(side=tk.LEFT, padx=20, pady=15)
+        
+        # Camera controls frame
+        camera_controls_frame = tk.Frame(control_frame, bg=COLORS["bg_secondary"])
+        camera_controls_frame.pack(side=tk.LEFT, padx=20, pady=10)
+        
+        # Flip Horizontal button
+        flip_h_btn = tk.Button(
+            camera_controls_frame,
+            text="↔️ Flip H",
+            bg=COLORS["bg_tertiary"],
+            fg=COLORS["text_primary"],
+            activebackground=COLORS["accent_blue"],
+            command=lambda: self.camera_flip_horizontal.set(not self.camera_flip_horizontal.get()),
+            font=("Segoe UI", 9, "bold"),
+            relief=tk.RAISED,
+            bd=2,
+            padx=10,
+            pady=5
+        )
+        flip_h_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Flip Vertical button
+        flip_v_btn = tk.Button(
+            camera_controls_frame,
+            text="↕️ Flip V",
+            bg=COLORS["bg_tertiary"],
+            fg=COLORS["text_primary"],
+            activebackground=COLORS["accent_blue"],
+            command=lambda: self.camera_flip_vertical.set(not self.camera_flip_vertical.get()),
+            font=("Segoe UI", 9, "bold"),
+            relief=tk.RAISED,
+            bd=2,
+            padx=10,
+            pady=5
+        )
+        flip_v_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Rotate button
+        rotate_btn = tk.Button(
+            camera_controls_frame,
+            text="🔄 Rotate",
+            bg=COLORS["bg_tertiary"],
+            fg=COLORS["text_primary"],
+            activebackground=COLORS["accent_blue"],
+            command=self.rotate_camera,
+            font=("Segoe UI", 9, "bold"),
+            relief=tk.RAISED,
+            bd=2,
+            padx=10,
+            pady=5
+        )
+        rotate_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Audio toggle button in control bar (using regular Button for better visibility)
+        self.audio_toggle_btn = tk.Button(
+            control_frame,
+            text="🎤 Audio: OFF",
+            bg=COLORS["warning"],
+            fg=COLORS["text_primary"],
+            activebackground=COLORS["success"],
+            activeforeground=COLORS["text_primary"],
+            command=lambda: self.toggle_audio(),
+            font=("Segoe UI", 14, "bold"),
+            relief=tk.RAISED,
+            bd=3,
+            cursor="hand2",
+            padx=25,
+            pady=12
+        )
+        self.audio_toggle_btn.pack(side=tk.RIGHT, padx=15, pady=12)
         
         stop_btn = ModernButton(
             control_frame,
@@ -1385,15 +1629,36 @@ class FaceRecognitionApp:
         process_frame_count = 0
         face_locations_cache = []
         face_names_cache = []
+        analysis_cache = {}  # Store analysis for each recognized face
+        
+        # Audio recording variables
+        audio_buffer = []
+        last_audio_process_time = 0
+        audio_process_interval = 3.0  # Process audio every 3 seconds
         
         def update_frame():
-            nonlocal process_frame_count, face_locations_cache, face_names_cache
+            nonlocal process_frame_count, face_locations_cache, face_names_cache, analysis_cache
             
             if not self.camera_running:
                 return
             
             ret, frame = self.video_capture.read()
             if ret:
+                # Apply camera transformations (flip/rotate)
+                if self.camera_flip_horizontal.get():
+                    frame = cv2.flip(frame, 1)  # Horizontal flip
+                if self.camera_flip_vertical.get():
+                    frame = cv2.flip(frame, 0)  # Vertical flip
+                
+                # Apply rotation
+                rotation = self.camera_rotate.get()
+                if rotation == 90:
+                    frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                elif rotation == 180:
+                    frame = cv2.rotate(frame, cv2.ROTATE_180)
+                elif rotation == 270:
+                    frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                
                 # Only process every 3rd frame for better performance
                 process_frame_count += 1
                 should_process = (process_frame_count % 3 == 0)
@@ -1412,14 +1677,66 @@ class FaceRecognitionApp:
                         rgb_small_frame, face_locations_cache
                     )
                     
-                    # Recognize faces
+                    # Recognize faces and get analysis
                     face_names_cache = []
-                    for face_encoding in face_encodings:
+                    analysis_cache = {}  # Reset analysis cache
+                    
+                    # Get DeepFace analyzer if using DeepFace model
+                    deepface_analyzer = None
+                    if self.detection_model.get() == "deepface":
+                        try:
+                            deepface_analyzer = self.get_detector()
+                        except:
+                            pass
+                    
+                    for i, face_encoding in enumerate(face_encodings):
                         name = self.recognize_face_in_frame(face_encoding)
-                        face_names_cache.append(name if name else "Unknown")
+                        name = name if name else "Unknown"
+                        face_names_cache.append(name)
+                        
+                        # Get DeepFace analysis for recognized faces (less frequently for performance)
+                        if deepface_analyzer and name != "Unknown" and (process_frame_count % 9 == 0):
+                            try:
+                                # Scale back to full frame size for analysis
+                                scale_factor = 1 / 0.4
+                                if i < len(face_locations_cache):
+                                    top, right, bottom, left = face_locations_cache[i]
+                                    top = int(top * scale_factor)
+                                    right = int(right * scale_factor)
+                                    bottom = int(bottom * scale_factor)
+                                    left = int(left * scale_factor)
+                                    
+                                    # Extract face region
+                                    face_roi = frame[max(0, top):min(frame.shape[0], bottom), 
+                                                   max(0, left):min(frame.shape[1], right)]
+                                    if face_roi.size > 0:
+                                        import tempfile
+                                        import os
+                                        temp_fd, temp_path = tempfile.mkstemp(suffix='.jpg')
+                                        os.close(temp_fd)
+                                        cv2.imwrite(temp_path, face_roi)
+                                        
+                                        analysis = deepface_analyzer.analyze_face(
+                                            temp_path,
+                                            actions=['emotion', 'age', 'gender', 'race']
+                                        )
+                                        
+                                        if analysis:
+                                            analysis_cache[name] = {
+                                                'emotion': analysis.get('dominant_emotion', 'N/A'),
+                                                'age': int(analysis.get('age', 0)),
+                                                'gender': analysis.get('dominant_gender', 'N/A'),
+                                                'race': analysis.get('dominant_race', 'N/A')
+                                            }
+                                        
+                                        os.remove(temp_path)
+                            except Exception as e:
+                                pass
                 
                 # Draw on full-size frame using cached results
                 scale_factor = 1 / 0.4  # Inverse of resize factor
+                
+                # Draw face bounding boxes and names
                 for (top, right, bottom, left), name in zip(face_locations_cache, face_names_cache):
                     # Scale back to full frame size
                     top = int(top * scale_factor)
@@ -1430,14 +1747,80 @@ class FaceRecognitionApp:
                     color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
                     cv2.rectangle(frame, (left, top), (right, bottom), color, 3)
                     
+                    # Draw name label (simpler, analysis shown in overlay)
+                    display_text = name
+                    text_size = cv2.getTextSize(display_text, cv2.FONT_HERSHEY_DUPLEX, 0.7, 2)[0]
+                    text_height = text_size[1] + 10
+                    
+                    # Draw background for name
                     cv2.rectangle(
-                        frame, (left, bottom - 40), (right, bottom), color, cv2.FILLED
+                        frame, (left, bottom - text_height), (right, bottom), color, cv2.FILLED
                     )
+                    
+                    # Draw name
                     font = cv2.FONT_HERSHEY_DUPLEX
                     cv2.putText(
-                        frame, name, (left + 6, bottom - 10),
+                        frame, display_text, (left + 6, bottom - 10),
                         font, 0.7, (255, 255, 255), 2
                     )
+                
+                # Draw analysis overlay in top-left corner (if using DeepFace and we have analysis)
+                if self.detection_model.get() == "deepface" and analysis_cache:
+                    # Calculate overlay size based on number of people
+                    num_people = len(analysis_cache)
+                    overlay_y = 10
+                    overlay_x = 10
+                    overlay_width = 320
+                    overlay_height = min(200, 50 + num_people * 80)  # Dynamic height
+                    
+                    # Semi-transparent background
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (overlay_x, overlay_y), 
+                                 (overlay_x + overlay_width, overlay_y + overlay_height), 
+                                 (0, 0, 0), -1)
+                    cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
+                    
+                    # Draw title with border
+                    title = "DeepFace Analysis"
+                    cv2.putText(frame, title, (overlay_x + 10, overlay_y + 28),
+                              cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 255, 255), 2)
+                    cv2.putText(frame, title, (overlay_x + 10, overlay_y + 28),
+                              cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 255), 1)
+                    
+                    # Draw analysis for each recognized person
+                    y_offset = overlay_y + 55
+                    line_height = 22
+                    for name, analysis_data in analysis_cache.items():
+                        if y_offset + line_height * 4 > overlay_y + overlay_height - 10:
+                            break  # Don't overflow overlay
+                        
+                        # Person name (highlighted)
+                        cv2.putText(frame, f"Person: {name}", 
+                                  (overlay_x + 10, y_offset),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                        y_offset += line_height
+                        
+                        # Emotion
+                        emotion = analysis_data.get('emotion', 'N/A')
+                        cv2.putText(frame, f"  Emotion: {emotion}", 
+                                  (overlay_x + 10, y_offset),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        y_offset += line_height
+                        
+                        # Age and Gender
+                        age = analysis_data.get('age', 0)
+                        gender = analysis_data.get('gender', 'N/A')
+                        cv2.putText(frame, f"  Age: {age}y | Gender: {gender}", 
+                                  (overlay_x + 10, y_offset),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        y_offset += line_height
+                        
+                        # Race
+                        race = analysis_data.get('race', 'N/A')
+                        cv2.putText(frame, f"  Race: {race}", 
+                                  (overlay_x + 10, y_offset),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                        y_offset += line_height + 8  # Extra space between people
                 
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 img = Image.fromarray(frame_rgb)
@@ -1450,14 +1833,380 @@ class FaceRecognitionApp:
             if self.camera_running:
                 camera_window.after(33, update_frame)  # ~30 FPS for better performance
         
+        # Start audio recording if enabled
+        if self.audio_enabled:
+            self.start_audio_recording()
+        
         update_frame()
+    
+    def rotate_camera(self):
+        """Rotate camera by 90 degrees (cycles: 0 -> 90 -> 180 -> 270 -> 0)."""
+        current = self.camera_rotate.get()
+        next_rotation = (current + 90) % 360
+        self.camera_rotate.set(next_rotation)
+        print(f"Camera rotated to {next_rotation} degrees")
     
     def stop_camera(self, window):
         """Stop the camera and close the window."""
         self.camera_running = False
         if self.video_capture:
             self.video_capture.release()
+        self.audio_enabled = False
+        self.stop_audio_recording()
         window.destroy()
+    
+    def toggle_audio(self):
+        """Toggle audio recording on/off."""
+        self.audio_enabled = not self.audio_enabled
+        
+        if self.audio_enabled:
+            # Update both buttons
+            if hasattr(self, 'audio_toggle_btn'):
+                self.audio_toggle_btn.config(text="🎤 Audio: ON", bg=COLORS["success"], fg=COLORS["text_primary"])
+            if hasattr(self, 'audio_toggle_btn_video'):
+                self.audio_toggle_btn_video.config(text="🎤 Audio: ON", bg=COLORS["success"], fg=COLORS["text_primary"])
+            if hasattr(self, 'transcript_status'):
+                self.transcript_status.config(
+                    text="🎤 Audio: ON - Listening... Speak now!",
+                    fg=COLORS["success"]
+                )
+            self.start_audio_recording()
+        else:
+            # Update both buttons
+            if hasattr(self, 'audio_toggle_btn'):
+                self.audio_toggle_btn.config(text="🎤 Audio: OFF", bg=COLORS["warning"], fg=COLORS["text_primary"])
+            if hasattr(self, 'audio_toggle_btn_video'):
+                self.audio_toggle_btn_video.config(text="🎤 Audio: OFF", bg=COLORS["warning"], fg=COLORS["text_primary"])
+            if hasattr(self, 'transcript_status'):
+                self.transcript_status.config(
+                    text="🎤 Audio: OFF - Click '🎤 Audio: OFF' button to start recording",
+                    fg=COLORS["warning"]
+                )
+            self.stop_audio_recording()
+    
+    def start_audio_recording(self):
+        """Start recording audio from microphone."""
+        if self.audio_recording:
+            return
+        
+        if pyaudio is None:
+            messagebox.showerror(
+                "Audio Error",
+                "PyAudio is not installed.\n\n"
+                "Please install it:\n"
+                "pip install pyaudio\n\n"
+                "Note: On Windows, you may need to install it via:\n"
+                "pip install pipwin\n"
+                "pipwin install pyaudio"
+            )
+            self.audio_enabled = False
+            if hasattr(self, 'audio_toggle_btn'):
+                self.audio_toggle_btn.config(text="🎤 Audio: OFF", bg=COLORS["warning"])
+            if hasattr(self, 'audio_toggle_btn_video'):
+                self.audio_toggle_btn_video.config(text="🎤 Audio: OFF", bg=COLORS["warning"])
+            return
+        
+        try:
+            self.pyaudio_instance = pyaudio.PyAudio()
+            self.audio_stream = self.pyaudio_instance.open(
+                format=self.audio_format,
+                channels=self.audio_channels,
+                rate=self.audio_sample_rate,
+                input=True,
+                frames_per_buffer=self.audio_chunk_size
+            )
+            self.audio_recording = True
+            self.audio_frames = []
+            
+            # Clear transcript when starting and show ready message
+            if hasattr(self, 'transcript_text'):
+                self.transcript_text.config(state=tk.NORMAL)
+                self.transcript_text.delete("1.0", tk.END)
+                self.transcript_text.insert("1.0", "🎤 Audio Recording Started!\n\n")
+                self.transcript_text.insert(tk.END, "Listening... Speak clearly into your microphone.\n\n")
+                self.transcript_text.insert(tk.END, "Transcription will appear here every 3 seconds...\n\n")
+                self.transcript_text.see(tk.END)
+                self.transcript_text.config(state=tk.DISABLED)
+            
+            # Start audio processing thread
+            threading.Thread(target=self.process_audio_loop, daemon=True).start()
+            print("✓ Audio recording started")
+        except Exception as e:
+            print(f"Error starting audio recording: {e}")
+            messagebox.showerror("Audio Error", f"Failed to start audio recording:\n{str(e)}")
+            self.audio_enabled = False
+            if hasattr(self, 'audio_toggle_btn'):
+                self.audio_toggle_btn.config(text="🎤 Audio: OFF", bg=COLORS["warning"])
+            if hasattr(self, 'audio_toggle_btn_video'):
+                self.audio_toggle_btn_video.config(text="🎤 Audio: OFF", bg=COLORS["warning"])
+            if hasattr(self, 'transcript_status'):
+                self.transcript_status.config(text=f"❌ Error: {str(e)}")
+    
+    def stop_audio_recording(self):
+        """Stop recording audio."""
+        self.audio_recording = False
+        
+        if self.audio_stream:
+            try:
+                self.audio_stream.stop_stream()
+                self.audio_stream.close()
+            except:
+                pass
+            self.audio_stream = None
+        
+        if self.pyaudio_instance:
+            try:
+                self.pyaudio_instance.terminate()
+            except:
+                pass
+            self.pyaudio_instance = None
+        
+        self.audio_frames = []
+        print("Audio recording stopped")
+    
+    def process_audio_loop(self):
+        """Continuously record and process audio."""
+        import time
+        
+        while self.audio_recording and self.audio_enabled:
+            try:
+                if self.audio_stream:
+                    # Read audio data
+                    data = self.audio_stream.read(self.audio_chunk_size, exception_on_overflow=False)
+                    self.audio_frames.append(data)
+                    
+                    # Process audio every 4 seconds for better accuracy (longer context)
+                    if len(self.audio_frames) >= (self.audio_sample_rate * 4) // self.audio_chunk_size:
+                        self.process_audio_chunk()
+                        self.audio_frames = []  # Clear buffer after processing
+                
+                time.sleep(0.01)  # Small delay to prevent CPU overload
+            except Exception as e:
+                print(f"Error in audio loop: {e}")
+                break
+    
+    def process_audio_chunk(self):
+        """Process recorded audio chunk: transcribe and send to Gemini."""
+        if not self.audio_frames:
+            return
+        
+        try:
+            # Convert audio frames to numpy array
+            audio_data = b''.join(self.audio_frames)
+            audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+            
+            # Normalize audio
+            if audio_np.max() > 0:
+                audio_np = audio_np / 32768.0
+            
+            # Transcribe audio with better accuracy settings
+            print("Transcribing audio...")
+            transcribed_text = transcribe_audio(audio_np, self.audio_sample_rate)
+            
+            if transcribed_text and len(transcribed_text.strip()) > 0:
+                print(f"Transcribed: {transcribed_text}")
+                
+                # Update transcript display in UI (ensure it shows in panel)
+                self.root.after(0, lambda text=transcribed_text: self.update_transcript(text))
+                
+                # Send to Gemini API if key is set
+                gemini_key = self.gemini_api_key.get().strip()
+                if gemini_key:
+                    self.root.after(0, lambda: self.send_to_gemini(transcribed_text, gemini_key))
+                else:
+                    # Just show transcribed text if no API key
+                    print("Gemini API key not set, showing transcription only")
+            else:
+                print("No speech detected in audio chunk")
+                # Update status to show listening
+                self.root.after(0, lambda: self.update_transcript_status("Listening... (no speech detected)"))
+                
+        except Exception as e:
+            print(f"Error processing audio chunk: {e}")
+            self.root.after(0, lambda: self.update_transcript_status(f"Error: {str(e)}"))
+    
+    def update_transcript(self, text):
+        """Update the transcript display with new transcribed text."""
+        if not hasattr(self, 'transcript_text'):
+            return
+        
+        try:
+            self.transcript_text.config(state=tk.NORMAL)
+            
+            # Add timestamp
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+            
+            # Add new transcription with user tag
+            self.transcript_text.insert(tk.END, f"[{timestamp}] You: {text}\n", "user_tag")
+            self.transcript_text.insert(tk.END, "\n")
+            
+            # Configure user tag styling
+            self.transcript_text.tag_config("user_tag", foreground=COLORS["accent_blue"], font=("Segoe UI", 10, "bold"))
+            
+            # Auto-scroll to bottom
+            self.transcript_text.see(tk.END)
+            
+            self.transcript_text.config(state=tk.DISABLED)
+            
+            # Force update to ensure it's visible
+            self.root.update_idletasks()
+            
+            # Update status with more visible feedback
+            gemini_key = self.gemini_api_key.get().strip()
+            if gemini_key:
+                self.update_transcript_status("✓ Transcribed! Sending to Gemini...")
+            else:
+                self.update_transcript_status("✓ Transcribed! (No Gemini API key - transcription only)")
+                
+        except Exception as e:
+            print(f"Error updating transcript: {e}")
+    
+    def update_transcript_status(self, message):
+        """Update the transcript status label."""
+        if hasattr(self, 'transcript_status'):
+            self.transcript_status.config(text=message)
+    
+    def send_to_gemini(self, text, api_key):
+        """Send transcribed text to Gemini API and show response."""
+        def gemini_thread():
+            try:
+                # Update status
+                self.root.after(0, lambda: self.update_transcript_status("🔄 Getting Gemini response..."))
+                
+                response = get_gemini_response(text, api_key)
+                
+                # Update transcript with Gemini response
+                self.root.after(0, lambda: self.add_gemini_response_to_transcript(response))
+                
+                # Also show popup
+                self.root.after(0, lambda: self.show_gemini_response(text, response))
+                
+                # Update status
+                self.root.after(0, lambda: self.update_transcript_status("✓ Gemini response received! Listening for more..."))
+            except Exception as e:
+                error_msg = f"Error getting Gemini response: {str(e)}"
+                self.root.after(0, lambda: self.add_gemini_response_to_transcript(f"❌ Error: {error_msg}"))
+                self.root.after(0, lambda: self.show_gemini_response(text, error_msg))
+                self.root.after(0, lambda: self.update_transcript_status(f"❌ Error: {error_msg}"))
+        
+        threading.Thread(target=gemini_thread, daemon=True).start()
+    
+    def add_gemini_response_to_transcript(self, response):
+        """Add Gemini response to the transcript display."""
+        if not hasattr(self, 'transcript_text'):
+            return
+        
+        try:
+            self.transcript_text.config(state=tk.NORMAL)
+            
+            # Add Gemini response with formatting
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+            
+            self.transcript_text.insert(tk.END, f"[{timestamp}] 🤖 Gemini: {response}\n\n")
+            self.transcript_text.insert(tk.END, "-" * 50 + "\n\n")
+            
+            # Auto-scroll to bottom
+            self.transcript_text.see(tk.END)
+            
+            self.transcript_text.config(state=tk.DISABLED)
+                
+        except Exception as e:
+            print(f"Error adding Gemini response to transcript: {e}")
+    
+    def show_gemini_response(self, user_text, gemini_response):
+        """Show Gemini response in a popup window."""
+        response_window = tk.Toplevel(self.root)
+        response_window.title("Gemini Response")
+        response_window.geometry("600x500")
+        response_window.configure(bg=COLORS["bg_primary"])
+        
+        # Header
+        header = tk.Frame(response_window, bg=COLORS["bg_secondary"], height=60)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        
+        tk.Label(
+            header,
+            text="🤖 Gemini Response",
+            font=("Segoe UI", 16, "bold"),
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_primary"],
+            pady=15
+        ).pack()
+        
+        # Content frame
+        content = tk.Frame(response_window, bg=COLORS["bg_primary"])
+        content.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # User message
+        tk.Label(
+            content,
+            text="You said:",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg_primary"],
+            fg=COLORS["text_secondary"],
+            anchor=tk.W
+        ).pack(fill=tk.X, pady=(0, 5))
+        
+        user_frame = tk.Frame(content, bg=COLORS["bg_secondary"], relief=tk.FLAT)
+        user_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        user_text_widget = tk.Text(
+            user_frame,
+            height=3,
+            wrap=tk.WORD,
+            font=("Segoe UI", 10),
+            bg=COLORS["bg_tertiary"],
+            fg=COLORS["text_primary"],
+            relief=tk.FLAT,
+            padx=10,
+            pady=10
+        )
+        user_text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        user_text_widget.insert("1.0", user_text)
+        user_text_widget.config(state=tk.DISABLED)
+        
+        # Gemini response
+        tk.Label(
+            content,
+            text="Gemini replied:",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg_primary"],
+            fg=COLORS["text_secondary"],
+            anchor=tk.W
+        ).pack(fill=tk.X, pady=(0, 5))
+        
+        response_frame = tk.Frame(content, bg=COLORS["bg_secondary"], relief=tk.FLAT)
+        response_frame.pack(fill=tk.BOTH, expand=True)
+        
+        response_text_widget = tk.Text(
+            response_frame,
+            wrap=tk.WORD,
+            font=("Segoe UI", 10),
+            bg=COLORS["bg_tertiary"],
+            fg=COLORS["text_primary"],
+            relief=tk.FLAT,
+            padx=10,
+            pady=10
+        )
+        response_text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        response_text_widget.insert("1.0", gemini_response)
+        response_text_widget.config(state=tk.DISABLED)
+        
+        # Close button
+        close_btn = ModernButton(
+            content,
+            text="Close",
+            bg=COLORS["accent_blue"],
+            fg=COLORS["text_primary"],
+            command=response_window.destroy,
+            font=("Segoe UI", 11, "bold"),
+            padx=20,
+            pady=8
+        )
+        close_btn.pack(pady=(15, 0))
     
     def test_image(self):
         """Test recognition on a single image or video."""
@@ -1510,6 +2259,14 @@ class FaceRecognitionApp:
                         except:
                             font = ImageFont.load_default()
                     
+                    # Get DeepFace analyzer if using DeepFace model
+                    deepface_analyzer = None
+                    if self.detection_model.get() == "deepface":
+                        try:
+                            deepface_analyzer = self.get_detector()
+                        except:
+                            pass
+                    
                     for bounding_box, unknown_encoding in zip(face_locations, face_encodings):
                         name = self.recognize_face_in_frame(unknown_encoding)
                         if not name:
@@ -1520,30 +2277,71 @@ class FaceRecognitionApp:
                         
                         draw.rectangle(((left, top), (right, bottom)), outline=color, width=4)
                         
+                        # Prepare display text
+                        display_text = name
+                        
+                        # Add DeepFace analysis if available
+                        if deepface_analyzer and name != "Unknown":
+                            try:
+                                # Extract face region
+                                face_roi = image[top:bottom, left:right]
+                                if face_roi.size > 0:
+                                    import tempfile
+                                    import os
+                                    temp_fd, temp_path = tempfile.mkstemp(suffix='.jpg')
+                                    os.close(temp_fd)
+                                    Image.fromarray(face_roi).save(temp_path, 'JPEG')
+                                    
+                                    analysis = deepface_analyzer.analyze_face(
+                                        temp_path,
+                                        actions=['emotion', 'age', 'gender', 'race']
+                                    )
+                                    
+                                    if analysis:
+                                        emotion = analysis.get('dominant_emotion', 'N/A')
+                                        age = int(analysis.get('age', 0))
+                                        gender = analysis.get('dominant_gender', 'N/A')
+                                        race = analysis.get('dominant_race', 'N/A')
+                                        
+                                        display_text = f"{name}\n{emotion} | {age}y | {gender} | {race}"
+                                    
+                                    os.remove(temp_path)
+                            except:
+                                pass
+                        
                         text_y = max(0, top - 30)
                         
                         try:
-                            bbox = draw.textbbox((left, text_y), name, font=font)
+                            bbox = draw.textbbox((left, text_y), display_text.split('\n')[0], font=font)
                             text_left, text_top, text_right, text_bottom = bbox
                         except:
                             text_left, text_top, text_right, text_bottom = draw.textbbox(
-                                (left, text_y), name
+                                (left, text_y), display_text.split('\n')[0]
                             )
+                        
+                        # Calculate height for multi-line text
+                        lines = display_text.split('\n')
+                        line_height = 25
+                        text_height = len(lines) * line_height
                         
                         padding = 5
                         draw.rectangle(
                             ((text_left - padding, text_top - padding), 
-                             (text_right + padding, text_bottom + padding)),
+                             (text_right + padding, text_top + text_height + padding)),
                             fill=color,
                             outline=color,
                         )
                         
-                        draw.text(
-                            (text_left, text_top),
-                            name,
-                            fill="white",
-                            font=font,
-                        )
+                        # Draw text (handle multi-line)
+                        current_y = text_top
+                        for line in display_text.split('\n'):
+                            draw.text(
+                                (text_left, current_y),
+                                line,
+                                fill="white",
+                                font=font,
+                            )
+                            current_y += line_height
                     
                     self.show_result_image(pillow_image, file_path)
                 
@@ -1833,8 +2631,10 @@ class FaceRecognitionApp:
         """Show settings window with modern dark theme."""
         window = tk.Toplevel(self.root)
         window.title("Settings")
-        window.geometry("500x400")
+        window.geometry("600x550")
         window.configure(bg=COLORS["bg_primary"])
+        window.transient(self.root)  # Make it modal
+        window.grab_set()  # Focus on this window
         
         header = tk.Frame(window, bg=COLORS["bg_secondary"], height=70)
         header.pack(fill=tk.X)
@@ -1930,10 +2730,68 @@ class FaceRecognitionApp:
             activeforeground=COLORS["text_primary"]
         ).pack(anchor=tk.W, padx=10)
         
+        # Gemini API Key Section (More Prominent)
+        gemini_frame = tk.Frame(content, bg=COLORS["bg_secondary"], relief=tk.FLAT, bd=2)
+        gemini_frame.pack(pady=20, padx=0, fill=tk.X)
+        
+        # Header with icon
+        gemini_header = tk.Frame(gemini_frame, bg=COLORS["accent_blue"], height=40)
+        gemini_header.pack(fill=tk.X)
+        gemini_header.pack_propagate(False)
+        
+        tk.Label(
+            gemini_header,
+            text="🤖 Gemini API Key (For Voice Chat)",
+            font=("Segoe UI", 12, "bold"),
+            bg=COLORS["accent_blue"],
+            fg=COLORS["text_primary"]
+        ).pack(pady=10)
+        
+        # Instructions
+        tk.Label(
+            gemini_frame,
+            text="Get your free API key from: https://makersuite.google.com/app/apikey",
+            font=("Segoe UI", 9),
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["text_secondary"],
+            cursor="hand2"
+        ).pack(anchor=tk.W, padx=20, pady=(15, 5))
+        
+        # Entry field
+        gemini_entry = tk.Entry(
+            gemini_frame,
+            textvariable=self.gemini_api_key,
+            font=("Segoe UI", 11),
+            bg=COLORS["bg_tertiary"],
+            fg=COLORS["text_primary"],
+            insertbackground=COLORS["text_primary"],
+            relief=tk.FLAT,
+            show="*",  # Hide API key
+            width=50
+        )
+        gemini_entry.pack(fill=tk.X, padx=20, pady=(5, 10))
+        
+        # Status indicator
+        api_status = tk.Label(
+            gemini_frame,
+            text="⚠️ API key not set - Voice chat will show transcription only",
+            font=("Segoe UI", 9, "italic"),
+            bg=COLORS["bg_secondary"],
+            fg=COLORS["warning"]
+        )
+        api_status.pack(anchor=tk.W, padx=20, pady=(0, 15))
+        
+        # Update status based on current key
+        if self.gemini_api_key.get().strip():
+            api_status.config(
+                text="✓ API key is set - Voice chat enabled",
+                fg=COLORS["success"]
+            )
+        
         close_btn = ModernButton(
             content,
-            text="Save & Close",
-            command=window.destroy,
+            text="💾 Save & Close",
+            command=lambda: self.save_settings(window),
             bg=COLORS["accent_green"],
             fg=COLORS["text_primary"],
             font=("Segoe UI", 11, "bold"),
@@ -1941,6 +2799,35 @@ class FaceRecognitionApp:
             pady=10
         )
         close_btn.pack(pady=20)
+    
+    def load_gemini_api_key(self):
+        """Load Gemini API key from file if exists."""
+        try:
+            key_file = Path("output/gemini_api_key.txt")
+            if key_file.exists():
+                with key_file.open("r") as f:
+                    self.gemini_api_key.set(f.read().strip())
+        except Exception as e:
+            print(f"Error loading Gemini API key: {e}")
+    
+    def save_gemini_api_key(self):
+        """Save Gemini API key to file."""
+        try:
+            output_dir = Path("output")
+            output_dir.mkdir(exist_ok=True)
+            key_file = output_dir / "gemini_api_key.txt"
+            with key_file.open("w") as f:
+                f.write(self.gemini_api_key.get().strip())
+        except Exception as e:
+            print(f"Error saving Gemini API key: {e}")
+    
+    def save_settings(self, window):
+        """Save settings and close window."""
+        # Save Gemini API key
+        self.save_gemini_api_key()
+        
+        window.destroy()
+        messagebox.showinfo("Success", "Settings saved!")
 
 
 def main():
