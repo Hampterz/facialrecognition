@@ -56,6 +56,29 @@ brew install python@3.12 cmake gcc
 
 ## Installation
 
+### Option 1: Docker (Easiest - Recommended for Other PCs)
+
+**Quick Start with Docker:**
+```bash
+# Clone repository
+git clone https://github.com/Hampterz/facialrecognition.git
+cd facialrecognition
+
+# Build and run with Docker Compose
+docker-compose up --build
+
+# Or use the quick run script
+# Linux/Mac:
+bash docker-run.sh
+
+# Windows:
+docker-run.bat
+```
+
+**See [DOCKER_SETUP.md](DOCKER_SETUP.md) for detailed Docker instructions.**
+
+### Option 2: Manual Installation
+
 ### Step 1: Create Virtual Environment (Recommended)
 
 ```bash
